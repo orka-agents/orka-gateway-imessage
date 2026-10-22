@@ -281,3 +281,69 @@ func TestSupervisorBacksOffAfterStartFailure(t *testing.T) {
 		t.Fatalf("start attempts during backoff = %d; want 1", starts)
 	}
 }
+
+func TestErrorNotificationEndsSubscription(t *testing.T) {
+	client, _ := newFakeClient(t, func(child *fakeChild, request fakeRequest) {
+		child.write(result(request.ID, `{"subscription":2}`))
+		child.write(`{"jsonrpc":"2.0","method":"error","params":{"subscription":2,"error":{"message":"database unavailable"}}}`)
+	})
+	sub, err := client.Subscribe(context.Background(), -5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := <-sub.Messages(); ok {
+		t.Fatal("subscription should end after an error notification")
+	}
+	if err := sub.Err(); err == nil || err.Error() != "imsg watch failed: database unavailable" {
+		t.Fatalf("Err = %v", err)
+	}
+}
+
+func TestSubscribeReplayFromFirstRow(t *testing.T) {
+	client, _ := newFakeClient(t, func(child *fakeChild, request fakeRequest) {
+		if string(request.Params) != `{"since_rowid":-1}` {
+			t.Errorf("replay subscribe params = %s", request.Params)
+		}
+		child.write(result(request.ID, `{"subscription":1}`))
+	})
+	if _, err := client.Subscribe(context.Background(), -1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLatestRowID(t *testing.T) {
+	for _, rows := range [][]int64{nil, {1}, {3, 7}, {5, 1024, 1025}, {2, 9, 4096, 70001}} {
+		var calls int
+		client, _ := newFakeClient(t, func(child *fakeChild, request fakeRequest) {
+			var params struct {
+				SinceRowID       int64 `json:"since_rowid"`
+				Limit            int   `json:"limit"`
+				IncludeReactions bool  `json:"include_reactions"`
+			}
+			_ = json.Unmarshal(request.Params, &params)
+			if request.Method != "messages.after" || params.Limit != 1 || !params.IncludeReactions {
+				t.Errorf("unexpected probe %s %s", request.Method, request.Params)
+			}
+			calls++
+			next, messages := params.SinceRowID, "[]"
+			for _, row := range rows {
+				if row > params.SinceRowID {
+					next, messages = row, fmt.Sprintf(`[{"id":%d}]`, row)
+					break
+				}
+			}
+			child.write(result(request.ID, fmt.Sprintf(`{"messages":%s,"next_rowid":%d,"has_more":false}`, messages, next)))
+		})
+		got, err := client.LatestRowID(context.Background())
+		want := int64(0)
+		if len(rows) > 0 {
+			want = rows[len(rows)-1]
+		}
+		if err != nil || got != want {
+			t.Fatalf("rows %v: LatestRowID = %d, %v; want %d", rows, got, err, want)
+		}
+		if calls > 40 {
+			t.Fatalf("rows %v: %d probes", rows, calls)
+		}
+	}
+}

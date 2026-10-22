@@ -19,9 +19,13 @@ import (
 )
 
 const (
-	// echoWindow bounds how long an outbound send suppresses an identical
-	// inbound row in the same chat (the received copy in a self-chat).
-	echoWindow     = 2 * time.Minute
+	// echoWindow is how close in time an outbound send and an identical
+	// inbound row in the same chat must be for the row to count as the
+	// send's echo (the received copy in a self-chat).
+	echoWindow = 2 * time.Minute
+	// maxMessageAge matches Orka's event expiry. Older rows are never
+	// forwarded, which also bounds any replay after a cursor reset.
+	maxMessageAge  = 24 * time.Hour
 	maxBackoff     = 30 * time.Second
 	stableWatchRun = time.Minute
 )
@@ -49,11 +53,30 @@ func (s *Server) RunInbound(ctx context.Context) {
 }
 
 func (s *Server) watchOnce(ctx context.Context) error {
-	cursor, err := s.store.Cursor(ctx)
+	cursor, initialized, err := s.store.Cursor(ctx)
 	if err != nil {
 		return fmt.Errorf("read watch cursor: %w", err)
 	}
-	stream, err := s.imessage.Subscribe(ctx, cursor)
+	if !initialized {
+		// First start: begin after the newest existing row and persist that
+		// position, so history is never forwarded and a restart resumes here.
+		latest, err := s.imessage.LatestRowID(ctx)
+		if err != nil {
+			return fmt.Errorf("find the newest Messages row: %w", err)
+		}
+		if err := s.store.InitializeCursor(ctx, latest); err != nil {
+			return fmt.Errorf("initialize watch cursor: %w", err)
+		}
+		if cursor, _, err = s.store.Cursor(ctx); err != nil {
+			return fmt.Errorf("read watch cursor: %w", err)
+		}
+	}
+	since := cursor
+	if since == 0 {
+		// The database had no rows when the cursor was initialized.
+		since = -1
+	}
+	stream, err := s.imessage.Subscribe(ctx, since)
 	if err != nil {
 		return fmt.Errorf("subscribe to Messages: %w", err)
 	}
@@ -129,6 +152,9 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	if err != nil {
 		return nil, "unsupported chat", nil
 	}
+	if chat.Group {
+		return nil, "group chat", nil
+	}
 	if !s.chatAllowed(chat) {
 		return nil, "chat is not allowlisted", nil
 	}
@@ -145,7 +171,18 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	case !protocol.ValidIdentity(message.GUID):
 		return nil, "invalid message GUID", nil
 	}
-	echo, err := s.store.RecentlySent(ctx, chat.GUID, store.TextDigest(text), time.Now().Add(-echoWindow))
+	created, err := time.Parse(time.RFC3339Nano, message.CreatedAt)
+	hasCreated := err == nil
+	if hasCreated && time.Since(created) > maxMessageAge {
+		return nil, "older than the event expiry", nil
+	}
+	// Match echoes against the row's own time so a late-processed echo
+	// still matches its send.
+	reference := time.Now()
+	if hasCreated {
+		reference = created
+	}
+	echo, err := s.store.SentNear(ctx, chat.GUID, store.TextDigest(text), reference, echoWindow)
 	if err != nil {
 		return nil, "", fmt.Errorf("check outbound echo: %w", err)
 	}
@@ -165,8 +202,8 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	if name := strings.TrimSpace(message.SenderName); protocol.ValidIdentity(name) {
 		event.Sender.DisplayName = name
 	}
-	if occurred, err := time.Parse(time.RFC3339Nano, message.CreatedAt); err == nil {
-		occurred = occurred.UTC()
+	if hasCreated {
+		occurred := created.UTC()
 		event.OccurredAt = &occurred
 	}
 	if err := protocol.ValidateEvent(event); err != nil {

@@ -23,7 +23,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddress != "127.0.0.1:8787" || cfg.IMSGPath != "imsg" || cfg.AllowGroups ||
+	if cfg.ListenAddress != "127.0.0.1:8787" || cfg.IMSGPath != "imsg" ||
 		cfg.SendTimeout != time.Minute || cfg.Allowlist.Len() != 2 ||
 		!strings.HasSuffix(cfg.DatabasePath, filepath.Join("orka-gateway-imessage", "adapter.db")) {
 		t.Fatalf("defaults = %+v", cfg)
@@ -32,13 +32,12 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadRequiresAllowlistAndDistinctTokens(t *testing.T) {
 	for name, env := range map[string][2]string{
-		"empty allowlist":  {"IMESSAGE_ALLOWED_SENDERS", ""},
-		"local phone":      {"IMESSAGE_ALLOWED_SENDERS", "4155551212"},
-		"no account":       {"IMESSAGE_ACCOUNT_ID", ""},
-		"same tokens":      {"ORKA_GATEWAY_OUTBOUND_TOKEN", "inbound"},
-		"bad groups value": {"IMESSAGE_ALLOW_GROUPS", "sometimes"},
-		"bad timeout":      {"SEND_TIMEOUT", "-1s"},
-		"bad log level":    {"LOG_LEVEL", "loud"},
+		"empty allowlist": {"IMESSAGE_ALLOWED_SENDERS", ""},
+		"local phone":     {"IMESSAGE_ALLOWED_SENDERS", "4155551212"},
+		"no account":      {"IMESSAGE_ACCOUNT_ID", ""},
+		"same tokens":     {"ORKA_GATEWAY_OUTBOUND_TOKEN", "inbound"},
+		"bad timeout":     {"SEND_TIMEOUT", "-1s"},
+		"bad log level":   {"LOG_LEVEL", "loud"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			setRequired(t)

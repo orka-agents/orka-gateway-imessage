@@ -6,7 +6,7 @@ This repository implements an out-of-tree Apple iMessage adapter for Orka's `ork
 
 - Never commit, print, or log Orka bearer tokens, message text, or Messages database contents.
 - Secrets come from environment variables or owner-only `*_FILE` paths. The `imsg` child never receives `ORKA_*` variables.
-- The sender allowlist is mandatory and fail-closed. Never forward a message from a non-allowlisted sender, and never send to a chat that did not produce an admitted inbound message from an allowlisted handle (the conformance chat is the only exception and must itself be an allowlisted direct chat).
+- The sender allowlist is mandatory and fail-closed. Never forward a message from a non-allowlisted sender, and send only to direct chats whose handle is allowlisted and that produced an admitted inbound message (the conformance chat is the only exception and must itself be an allowlisted direct chat). Group chats are unsupported because a reply reaches every member.
 - Never retry a send whose outcome is unknown. Only outcomes `imsg` proves were not dispatched are retryable.
 - Automated tests use `scripts/fake-imsg`. Do not run tests or tools that send real messages without an explicitly approved recipient.
 - Keep iMessage-specific code outside Orka core.

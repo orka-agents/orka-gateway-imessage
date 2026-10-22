@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +20,6 @@ type Config struct {
 	IMSGDatabasePath    string
 	AccountID           string
 	Allowlist           imessage.Allowlist
-	AllowGroups         bool
 	ConformanceChatGUID string
 	OrkaIngressURL      string
 	OrkaInboundToken    string
@@ -51,8 +49,6 @@ func Load() (Config, error) {
 	collect(err)
 	shutdownTimeout, err := durationEnv("SHUTDOWN_TIMEOUT", 20*time.Second)
 	collect(err)
-	allowGroups, err := boolEnv("IMESSAGE_ALLOW_GROUPS", false)
-	collect(err)
 	allowlist, err := imessage.ParseAllowlist(os.Getenv("IMESSAGE_ALLOWED_SENDERS"))
 	if err != nil {
 		errs = append(errs, fmt.Errorf("IMESSAGE_ALLOWED_SENDERS: %w", err))
@@ -72,7 +68,6 @@ func Load() (Config, error) {
 		IMSGDatabasePath:    strings.TrimSpace(os.Getenv("IMSG_DB_PATH")),
 		AccountID:           strings.TrimSpace(os.Getenv("IMESSAGE_ACCOUNT_ID")),
 		Allowlist:           allowlist,
-		AllowGroups:         allowGroups,
 		ConformanceChatGUID: strings.TrimSpace(os.Getenv("IMESSAGE_CONFORMANCE_CHAT_GUID")),
 		OrkaIngressURL:      strings.TrimSpace(os.Getenv("ORKA_GATEWAY_INGRESS_URL")),
 		OrkaInboundToken:    inboundToken,
@@ -135,18 +130,6 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func boolEnv(name string, fallback bool) (bool, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("%s must be true or false", name)
-	}
-	return parsed, nil
 }
 
 func durationEnv(name string, fallback time.Duration) (time.Duration, error) {

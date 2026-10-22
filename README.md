@@ -17,10 +17,10 @@ The adapter starts [`imsg rpc`](https://github.com/steipete/imsg) as a child pro
 A Mac's Messages account is usually a personal account, so the adapter is deliberately narrow:
 
 - **Allowlisted senders only.** `IMESSAGE_ALLOWED_SENDERS` is required. Messages from anyone else are never forwarded to Orka, so Orka never sees them and cannot send a denial reply.
-- **Replies only where you spoke first.** A delivery is sent only to a chat that produced an admitted inbound message, and a direct chat's handle must still be allowlisted. Group chats are off unless `IMESSAGE_ALLOW_GROUPS=true`.
-- **No history replay.** The first start begins at the newest message. Later starts resume from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped.
+- **Replies only where you spoke first.** A delivery is sent only to a direct chat that produced an admitted inbound message and whose handle is still allowlisted. Group chats are never forwarded or answered, because a group reply reaches every member.
+- **No history replay.** The first start records the newest existing message and begins after it. Every later start resumes from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped. Messages older than 24 hours, Orka's event expiry, are never forwarded.
 - **No duplicate sends.** Deliveries are idempotent in SQLite. A send whose outcome `imsg` cannot prove is recorded as unknown and is never retried, even after a restart.
-- **No reply loops.** Your own outgoing rows are ignored, and an inbound copy of text the adapter just sent to the same chat is dropped. A self-chat echoes each sent message back as an inbound row.
+- **No reply loops.** Your own outgoing rows are ignored. A self-chat echoes each sent message back as an inbound row, so an inbound row whose text matches an adapter send to the same chat within two minutes of the row's own timestamp is dropped, even when it is processed late.
 - **Text only.** Attachments, reactions, polls, edits, and unsends are not forwarded. Threads are not advertised.
 
 ## Requirements
@@ -147,7 +147,6 @@ Run with `LOG_LEVEL=debug` to see why a message was skipped. Logs never contain 
 | --- | --- | --- |
 | `IMESSAGE_ACCOUNT_ID` | required | Orka `accountId` for this Messages account |
 | `IMESSAGE_ALLOWED_SENDERS` | required | Comma-separated handles allowed to reach Orka and receive replies |
-| `IMESSAGE_ALLOW_GROUPS` | `false` | Forward allowlisted senders' group-chat messages and allow group replies |
 | `IMESSAGE_CONFORMANCE_CHAT_GUID` | empty | Allowlisted direct chat that receives Orka conformance probe sends |
 | `ORKA_GATEWAY_INGRESS_URL` | required | `.../api/v1/gateways/<namespace>/imessage/events` |
 | `ORKA_GATEWAY_INBOUND_TOKEN[_FILE]` | required | Token the adapter sends to Orka |
@@ -163,7 +162,7 @@ Run with `LOG_LEVEL=debug` to see why a message was skipped. Logs never contain 
 
 The adapter serves `GET /healthz` and `GET /readyz` without authentication, and the protocol routes `GET /v1/health`, `GET /v1/capabilities`, and `POST /v1/deliveries` with the outbound token. It advertises interim delivery, so Agents can post progress updates with `reply_in_conversation`.
 
-The ROWID cursor belongs to one Messages database. If `chat.db` is replaced or restored, stop the adapter and delete its database before restarting so it starts again at the newest message. Delivery records are not pruned.
+The ROWID cursor belongs to one Messages database. If `chat.db` is replaced or restored, stop the adapter and delete its database before restarting so it records the newest message again. Delivery records are not pruned.
 
 ## Run at login with launchd
 

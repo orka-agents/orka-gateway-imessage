@@ -160,14 +160,25 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.QueryRowContext(ctx, `SELECT 1`).Scan(&one)
 }
 
-// Cursor returns the highest processed Messages row, or 0 before the first.
-func (s *Store) Cursor(ctx context.Context) (int64, error) {
-	var rowID int64
-	err := s.db.QueryRowContext(ctx, `SELECT last_rowid FROM watch_cursor WHERE id = 1`).Scan(&rowID)
+// Cursor returns the highest processed Messages row. initialized is false
+// until InitializeCursor or AdvanceCursor first records a position.
+func (s *Store) Cursor(ctx context.Context) (rowID int64, initialized bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT last_rowid FROM watch_cursor WHERE id = 1`).Scan(&rowID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, false, nil
 	}
-	return rowID, err
+	return rowID, err == nil, err
+}
+
+// InitializeCursor records the starting position once; later calls keep the
+// existing cursor. rowID 0 means the Messages database had no rows.
+func (s *Store) InitializeCursor(ctx context.Context, rowID int64) error {
+	if rowID < 0 {
+		return errors.New("cursor row must not be negative")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO watch_cursor (id, last_rowid, updated_at_ms) VALUES (1, ?, ?)
+		ON CONFLICT (id) DO NOTHING`, rowID, nowMillis())
+	return err
 }
 
 // AdvanceCursor records rowID as processed. The cursor never moves backwards.
@@ -199,14 +210,16 @@ func (s *Store) ReplyChatKnown(ctx context.Context, chatGUID string) (bool, erro
 	return err == nil, err
 }
 
-// RecentlySent reports whether the adapter sent (or may have sent) text with
-// textDigest to chatGUID since the given time. Self-chats echo outbound sends
-// back as inbound rows; this lets the adapter drop them instead of looping.
-func (s *Store) RecentlySent(ctx context.Context, chatGUID, textDigest string, since time.Time) (bool, error) {
+// SentNear reports whether the adapter sent (or may have sent) text with
+// textDigest to chatGUID within window of at, the time a Messages row was
+// created. Self-chats echo outbound sends back as inbound rows; keying on the
+// row's own time drops them even when they are processed late.
+func (s *Store) SentNear(ctx context.Context, chatGUID, textDigest string, at time.Time, window time.Duration) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM deliveries
-		WHERE chat_guid = ? AND text_digest = ? AND state IN ('sending','delivered','unknown') AND updated_at_ms >= ?
-		LIMIT 1`, chatGUID, textDigest, since.UnixMilli()).Scan(&one)
+		WHERE chat_guid = ? AND text_digest = ? AND state IN ('sending','delivered','unknown')
+			AND created_at_ms <= ? AND updated_at_ms >= ?
+		LIMIT 1`, chatGUID, textDigest, at.Add(window).UnixMilli(), at.Add(-window).UnixMilli()).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

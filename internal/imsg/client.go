@@ -200,11 +200,11 @@ func (c *Client) Send(ctx context.Context, chatGUID, text string) (SendResult, e
 }
 
 // Subscribe starts an all-chat watch. sinceRowID > 0 resumes after that
-// message row; 0 starts at the current tail and never replays history.
+// message row, -1 replays from the first row, and 0 starts at the current tail.
 func (c *Client) Subscribe(ctx context.Context, sinceRowID int64) (*Subscription, error) {
 	params := map[string]any{}
-	if sinceRowID > 0 {
-		params["since_rowid"] = sinceRowID
+	if sinceRowID != 0 {
+		params["since_rowid"] = max(sinceRowID, -1)
 	}
 	_, value, err := c.call(ctx, "watch.subscribe", params, func(raw json.RawMessage) any {
 		var response struct {
@@ -231,6 +231,53 @@ func (c *Client) Subscribe(ctx context.Context, sinceRowID int64) (*Subscription
 		return nil, errors.New("imsg returned an invalid subscription")
 	}
 	return sub, nil
+}
+
+// LatestRowID returns the newest message row visible to imsg, or 0 when the
+// database has none. It searches with one-row messages.after pages rather than
+// reading history.
+func (c *Client) LatestRowID(ctx context.Context) (int64, error) {
+	// rowsAfter reports whether any message row is newer than rowID.
+	rowsAfter := func(rowID int64) (bool, error) {
+		var page struct {
+			Messages  []json.RawMessage `json:"messages"`
+			NextRowID int64             `json:"next_rowid"`
+			HasMore   bool              `json:"has_more"`
+		}
+		err := c.Call(ctx, "messages.after", map[string]any{"since_rowid": rowID, "limit": 1, "include_reactions": true}, &page)
+		return len(page.Messages) > 0 || page.HasMore || page.NextRowID > rowID, err
+	}
+	// Find the smallest row with nothing newer: grow an upper bound, then bisect.
+	low, high := int64(0), int64(1)
+	if found, err := rowsAfter(low); err != nil || !found {
+		return 0, err
+	}
+	for {
+		found, err := rowsAfter(high)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			break
+		}
+		if high > 1<<52 {
+			return 0, errors.New("imsg message rows exceed the supported range")
+		}
+		low, high = high, high*2
+	}
+	for high-low > 1 {
+		middle := low + (high-low)/2
+		found, err := rowsAfter(middle)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			low = middle
+		} else {
+			high = middle
+		}
+	}
+	return high, nil
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, hook func(json.RawMessage) any) (json.RawMessage, any, error) {
@@ -361,6 +408,22 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 		c.mu.Lock()
 		if sub := c.subs[notification.Subscription]; sub != nil {
 			c.finishLocked(sub, &OverflowError{ResumeAfterRowID: notification.ResumeAfterRowID, Reason: notification.Reason})
+		}
+		c.mu.Unlock()
+	case "error":
+		// imsg ends a subscription with this notification when watching fails.
+		var notification struct {
+			Subscription int64 `json:"subscription"`
+			Error        struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(params, &notification); err != nil {
+			return
+		}
+		c.mu.Lock()
+		if sub := c.subs[notification.Subscription]; sub != nil {
+			c.finishLocked(sub, fmt.Errorf("imsg watch failed: %s", safeError(errors.New(notification.Error.Message))))
 		}
 		c.mu.Unlock()
 	}

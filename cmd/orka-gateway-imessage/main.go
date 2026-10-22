@@ -61,9 +61,8 @@ func run() error {
 	}
 
 	server, err := adapter.New(adapter.Config{
-		AccountID: cfg.AccountID, Allowlist: cfg.Allowlist, AllowGroups: cfg.AllowGroups,
-		ConformanceChatGUID: cfg.ConformanceChatGUID,
-		IngressURL:          cfg.OrkaIngressURL, IngressBearerToken: cfg.OrkaInboundToken,
+		AccountID: cfg.AccountID, Allowlist: cfg.Allowlist, ConformanceChatGUID: cfg.ConformanceChatGUID,
+		IngressURL: cfg.OrkaIngressURL, IngressBearerToken: cfg.OrkaInboundToken,
 		OutboundBearerToken: cfg.OrkaOutboundToken, AdapterVersion: cfg.AdapterVersion,
 		SendTimeout: cfg.SendTimeout, HTTPClient: &http.Client{Timeout: cfg.RequestTimeout}, Logger: logger,
 	}, database, adapter.FromSupervisor(supervisor))
@@ -81,7 +80,7 @@ func run() error {
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("starting iMessage gateway adapter", "address", cfg.ListenAddress, "version", cfg.AdapterVersion,
-			"allowlisted_handles", cfg.Allowlist.Len(), "allow_groups", cfg.AllowGroups)
+			"allowlisted_handles", cfg.Allowlist.Len())
 		serverErr <- httpServer.ListenAndServe()
 	}()
 	var inbound sync.WaitGroup

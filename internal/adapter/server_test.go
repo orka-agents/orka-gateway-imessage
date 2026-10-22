@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka-gateway-imessage/internal/imessage"
 	"github.com/orka-agents/orka-gateway-imessage/internal/imsg"
@@ -35,6 +36,15 @@ type fakeIMessage struct {
 	results []func() (imsg.SendResult, error)
 	since   []int64
 	streams chan *fakeStream
+	latest  int64
+	latests int
+}
+
+func (f *fakeIMessage) LatestRowID(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latests++
+	return f.latest, nil
 }
 
 func (f *fakeIMessage) Send(_ context.Context, chat, text string) (imsg.SendResult, error) {
@@ -251,7 +261,7 @@ func TestDeliveryOnlyReachesAdmittedAllowlistedChats(t *testing.T) {
 		"not allowlisted": func(r *protocol.DeliveryRequest) {
 			r.ContextID, r.ReplyTarget = "iMessage;-;+14155550000", "iMessage;-;+14155550000"
 		},
-		"group disabled": func(r *protocol.DeliveryRequest) {
+		"group": func(r *protocol.DeliveryRequest) {
 			r.ContextID, r.ReplyTarget = "iMessage;+;chat42", "iMessage;+;chat42"
 		},
 		"account mismatch": func(r *protocol.DeliveryRequest) { r.AccountID = "other" },
@@ -368,7 +378,7 @@ func TestDeliveryBounds(t *testing.T) {
 func inboundMessage(id int64, text string) imsg.Message {
 	return imsg.Message{
 		ID: id, GUID: fmt.Sprintf("MSG-%d", id), ChatGUID: testChat, ChatIdentifier: testHandle,
-		Sender: testHandle, SenderName: "Test Person", Text: text, CreatedAt: "2026-10-22T07:00:00.123Z",
+		Sender: testHandle, SenderName: "Test Person", Text: text, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
 
@@ -388,7 +398,7 @@ func TestInboundForwardsAllowlistedText(t *testing.T) {
 		event.Text != "What's up?" || event.OccurredAt == nil || event.ThreadID != "" || len(event.Metadata) != 0 {
 		t.Fatalf("event = %+v", event)
 	}
-	if cursor, _ := h.store.Cursor(ctx); cursor != 42 {
+	if cursor, _, _ := h.store.Cursor(ctx); cursor != 42 {
 		t.Fatalf("cursor = %d", cursor)
 	}
 	if known, _ := h.store.ReplyChatKnown(ctx, testChat); !known {
@@ -425,7 +435,7 @@ func TestInboundSkipsEverythingElse(t *testing.T) {
 	if events := h.orka.received(); len(events) != 0 {
 		t.Fatalf("skipped messages reached Orka: %+v", events)
 	}
-	if cursor, _ := h.store.Cursor(ctx); cursor != rowID {
+	if cursor, _, _ := h.store.Cursor(ctx); cursor != rowID {
 		t.Fatalf("cursor = %d; want %d", cursor, rowID)
 	}
 	edit := inboundMessage(rowID+10, "edited")
@@ -433,7 +443,7 @@ func TestInboundSkipsEverythingElse(t *testing.T) {
 	if err := h.server.handleInbound(ctx, edit); err != nil {
 		t.Fatal(err)
 	}
-	if cursor, _ := h.store.Cursor(ctx); cursor != rowID {
+	if cursor, _, _ := h.store.Cursor(ctx); cursor != rowID {
 		t.Fatalf("an edit advanced the cursor to %d", cursor)
 	}
 	if known, _ := h.store.ReplyChatKnown(ctx, "iMessage;-;+14155550000"); known {
@@ -441,20 +451,15 @@ func TestInboundSkipsEverythingElse(t *testing.T) {
 	}
 }
 
-func TestInboundGroupsRequireOptIn(t *testing.T) {
-	h := newHarness(t, func(c *Config) { c.AllowGroups = true })
-	message := inboundMessage(1, "hi team")
-	message.ChatGUID, message.IsGroup = "iMessage;+;chat42", true
-	if err := h.server.handleInbound(context.Background(), message); err != nil {
+func TestInboundIgnoresStaleRows(t *testing.T) {
+	h := newHarness(t, nil)
+	stale := inboundMessage(1, "from yesterday")
+	stale.CreatedAt = time.Now().Add(-maxMessageAge - time.Minute).UTC().Format(time.RFC3339Nano)
+	if err := h.server.handleInbound(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
-	other := inboundMessage(2, "not allowlisted")
-	other.ChatGUID, other.IsGroup, other.Sender = "iMessage;+;chat42", true, "+14155550000"
-	if err := h.server.handleInbound(context.Background(), other); err != nil {
-		t.Fatal(err)
-	}
-	if events := h.orka.received(); len(events) != 1 || events[0].ContextID != "iMessage;+;chat42" {
-		t.Fatalf("events = %+v", events)
+	if events := h.orka.received(); len(events) != 0 {
+		t.Fatalf("stale row reached Orka: %+v", events)
 	}
 }
 
@@ -472,18 +477,23 @@ func TestInboundSuppressesEchoOfAdapterSend(t *testing.T) {
 	if _, response := h.deliver(t, reply); response.Status != protocol.DeliveryStatusDelivered {
 		t.Fatalf("reply = %+v", response)
 	}
+	// The echo row carries the send time even when it is processed later,
+	// for example after a restart.
 	echo := inboundMessage(2, "pong")
 	echo.ChatGUID, echo.Sender = selfChat, "Me@Example.com"
+	echo.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := h.server.handleInbound(ctx, echo); err != nil {
 		t.Fatal(err)
 	}
-	next := inboundMessage(3, "thanks")
-	next.ChatGUID, next.Sender = selfChat, "me@example.com"
-	if err := h.server.handleInbound(ctx, next); err != nil {
+	// The same text written well before the reply is the user's own message.
+	earlier := inboundMessage(3, "pong")
+	earlier.ChatGUID, earlier.Sender = selfChat, "me@example.com"
+	earlier.CreatedAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	if err := h.server.handleInbound(ctx, earlier); err != nil {
 		t.Fatal(err)
 	}
 	events := h.orka.received()
-	if len(events) != 2 || events[0].Text != "ping" || events[1].Text != "thanks" {
+	if len(events) != 2 || events[0].Text != "ping" || events[1].ExternalEventID != "MSG-3" {
 		t.Fatalf("events = %+v", events)
 	}
 }
@@ -501,17 +511,14 @@ func TestInboundRetriesTransientIngressAndSkipsRejectedEvents(t *testing.T) {
 	if events := h.orka.received(); len(events) != 1 || events[0].Text != "retry me" {
 		t.Fatalf("events = %+v", events)
 	}
-	if cursor, _ := h.store.Cursor(ctx); cursor != 2 {
+	if cursor, _, _ := h.store.Cursor(ctx); cursor != 2 {
 		t.Fatalf("cursor = %d", cursor)
 	}
 }
 
-func TestWatchResumesFromDurableCursor(t *testing.T) {
-	h := newHarness(t, nil)
+func runWatch(t *testing.T, h *harness, feed func(stream *fakeStream)) []int64 {
+	t.Helper()
 	h.imessage.streams = make(chan *fakeStream, 2)
-	if err := h.store.AdvanceCursor(context.Background(), 41); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -519,16 +526,46 @@ func TestWatchResumesFromDurableCursor(t *testing.T) {
 		h.server.RunInbound(ctx)
 	}()
 	stream := <-h.imessage.streams
-	stream.messages <- inboundMessage(42, "hello")
+	feed(stream)
 	stream.Close()
 	<-h.imessage.streams
 	cancel()
 	<-done
 	h.imessage.mu.Lock()
-	since := append([]int64(nil), h.imessage.since...)
-	h.imessage.mu.Unlock()
-	if len(since) != 2 || since[0] != 41 || since[1] != 42 {
-		t.Fatalf("subscriptions resumed from %v", since)
+	defer h.imessage.mu.Unlock()
+	return append([]int64(nil), h.imessage.since...)
+}
+
+func TestWatchResumesFromDurableCursor(t *testing.T) {
+	h := newHarness(t, nil)
+	if err := h.store.AdvanceCursor(context.Background(), 41); err != nil {
+		t.Fatal(err)
+	}
+	since := runWatch(t, h, func(stream *fakeStream) { stream.messages <- inboundMessage(42, "hello") })
+	if len(since) != 2 || since[0] != 41 || since[1] != 42 || h.imessage.latests != 0 {
+		t.Fatalf("subscriptions resumed from %v after %d tail lookups", since, h.imessage.latests)
+	}
+}
+
+func TestWatchFirstStartPersistsTheNewestRow(t *testing.T) {
+	h := newHarness(t, nil)
+	h.imessage.latest = 900
+	// No message arrives before the restart: the second subscription must
+	// still resume from the persisted tail rather than a new one.
+	since := runWatch(t, h, func(*fakeStream) {})
+	if len(since) != 2 || since[0] != 900 || since[1] != 900 || h.imessage.latests != 1 {
+		t.Fatalf("subscriptions = %v after %d tail lookups", since, h.imessage.latests)
+	}
+	if events := h.orka.received(); len(events) != 0 {
+		t.Fatalf("history reached Orka: %+v", events)
+	}
+}
+
+func TestWatchEmptyDatabaseReplaysFromTheFirstRow(t *testing.T) {
+	h := newHarness(t, nil)
+	since := runWatch(t, h, func(*fakeStream) {})
+	if len(since) != 2 || since[0] != -1 || since[1] != -1 {
+		t.Fatalf("subscriptions = %v", since)
 	}
 }
 

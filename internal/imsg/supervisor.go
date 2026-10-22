@@ -74,6 +74,15 @@ func (s *Supervisor) Subscribe(ctx context.Context, sinceRowID int64) (*Subscrip
 	return client.Subscribe(ctx, sinceRowID)
 }
 
+// LatestRowID returns the newest message row visible to imsg.
+func (s *Supervisor) LatestRowID(ctx context.Context) (int64, error) {
+	client, err := s.current(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return client.LatestRowID(ctx)
+}
+
 // Close stops the child, letting it drain accepted requests first.
 func (s *Supervisor) Close() {
 	s.mu.Lock()

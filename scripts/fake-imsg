@@ -35,6 +35,8 @@ def main():
         elif method == "watch.subscribe":
             subscription += 1
             respond(request_id, {"subscription": subscription, "buffer_limit": 256})
+        elif method == "messages.after":
+            respond(request_id, {"messages": [], "next_rowid": params.get("since_rowid", 0), "has_more": False})
         elif method == "watch.unsubscribe":
             respond(request_id, {"ok": True})
         elif method == "send":

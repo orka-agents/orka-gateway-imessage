@@ -23,8 +23,17 @@ func TestCursorIsMonotonicAndDurable(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "nested", "adapter.db")
 	database := openTest(t, path)
-	if cursor, err := database.Cursor(ctx); err != nil || cursor != 0 {
-		t.Fatalf("initial cursor = %d, %v", cursor, err)
+	if cursor, initialized, err := database.Cursor(ctx); err != nil || cursor != 0 || initialized {
+		t.Fatalf("initial cursor = %d, %v, %v", cursor, initialized, err)
+	}
+	if err := database.InitializeCursor(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.InitializeCursor(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, initialized, err := database.Cursor(ctx); err != nil || cursor != 5 || !initialized {
+		t.Fatalf("initialized cursor = %d, %v, %v", cursor, initialized, err)
 	}
 	for _, rowID := range []int64{10, 7, 12} {
 		if err := database.AdvanceCursor(ctx, rowID); err != nil {
@@ -40,8 +49,22 @@ func TestCursorIsMonotonicAndDurable(t *testing.T) {
 		t.Fatalf("database mode = %v, %v", info.Mode().Perm(), err)
 	}
 	reopened := openTest(t, path)
-	if cursor, err := reopened.Cursor(ctx); err != nil || cursor != 12 {
+	if cursor, _, err := reopened.Cursor(ctx); err != nil || cursor != 12 {
 		t.Fatalf("reopened cursor = %d, %v", cursor, err)
+	}
+}
+
+func TestEmptyDatabaseCursorIsInitialized(t *testing.T) {
+	ctx := context.Background()
+	database := openTest(t, filepath.Join(t.TempDir(), "adapter.db"))
+	if err := database.InitializeCursor(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, initialized, err := database.Cursor(ctx); err != nil || cursor != 0 || !initialized {
+		t.Fatalf("cursor = %d, %v, %v", cursor, initialized, err)
+	}
+	if err := database.InitializeCursor(ctx, -1); err == nil {
+		t.Fatal("negative initial cursor accepted")
 	}
 }
 
@@ -108,21 +131,22 @@ func TestDeliveryLifecycle(t *testing.T) {
 	}
 }
 
-func TestRecentlySent(t *testing.T) {
+func TestSentNear(t *testing.T) {
 	ctx := context.Background()
 	database := openTest(t, filepath.Join(t.TempDir(), "adapter.db"))
 	chat := "iMessage;-;me@example.com"
+	window := 2 * time.Minute
 	if _, _, err := database.ClaimDelivery(ctx, "d1", "digest", chat, TextDigest("hello\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	since := time.Now().Add(-time.Minute)
-	if echo, err := database.RecentlySent(ctx, chat, TextDigest(" hello\n"), since); err != nil || !echo {
+	now := time.Now()
+	if echo, err := database.SentNear(ctx, chat, TextDigest(" hello\n"), now, window); err != nil || !echo {
 		t.Fatalf("in-flight echo = %v, %v", echo, err)
 	}
 	if _, err := database.FinishDelivery(ctx, "d1", "digest", DeliveryPermanent, "", "rejected"); err != nil {
 		t.Fatal(err)
 	}
-	if echo, err := database.RecentlySent(ctx, chat, TextDigest("hello"), since); err != nil || echo {
+	if echo, err := database.SentNear(ctx, chat, TextDigest("hello"), now, window); err != nil || echo {
 		t.Fatalf("rejected send must not suppress inbound text: %v, %v", echo, err)
 	}
 	if _, _, err := database.ClaimDelivery(ctx, "d2", "digest2", chat, TextDigest("bye")); err != nil {
@@ -131,18 +155,25 @@ func TestRecentlySent(t *testing.T) {
 	if _, err := database.FinishDelivery(ctx, "d2", "digest2", DeliveryDelivered, "G", ""); err != nil {
 		t.Fatal(err)
 	}
+	sent := time.Now()
+	// The match depends on the inbound row's time, not on when it is processed.
+	if echo, err := database.SentNear(ctx, chat, TextDigest("bye"), sent, window); err != nil || !echo {
+		t.Fatalf("delivered echo = %v, %v", echo, err)
+	}
 	for name, check := range map[string]func() (bool, error){
-		"other chat": func() (bool, error) { return database.RecentlySent(ctx, "iMessage;-;+1415", TextDigest("bye"), since) },
-		"other text": func() (bool, error) { return database.RecentlySent(ctx, chat, TextDigest("bye!"), since) },
-		"expired": func() (bool, error) {
-			return database.RecentlySent(ctx, chat, TextDigest("bye"), time.Now().Add(time.Minute))
+		"other chat": func() (bool, error) {
+			return database.SentNear(ctx, "iMessage;-;+1415", TextDigest("bye"), sent, window)
+		},
+		"other text": func() (bool, error) { return database.SentNear(ctx, chat, TextDigest("bye!"), sent, window) },
+		"row long after send": func() (bool, error) {
+			return database.SentNear(ctx, chat, TextDigest("bye"), sent.Add(time.Hour), window)
+		},
+		"row long before send": func() (bool, error) {
+			return database.SentNear(ctx, chat, TextDigest("bye"), sent.Add(-time.Hour), window)
 		},
 	} {
 		if echo, err := check(); err != nil || echo {
 			t.Errorf("%s: echo = %v, %v", name, echo, err)
 		}
-	}
-	if echo, err := database.RecentlySent(ctx, chat, TextDigest("bye"), since); err != nil || !echo {
-		t.Fatalf("delivered echo = %v, %v", echo, err)
 	}
 }

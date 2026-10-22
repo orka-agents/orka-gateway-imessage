@@ -33,7 +33,10 @@ type Stream interface {
 // IMessage is the Messages bridge the adapter drives.
 type IMessage interface {
 	Send(ctx context.Context, chatGUID, text string) (imsg.SendResult, error)
+	// Subscribe watches all chats after sinceRowID; -1 replays from the first row.
 	Subscribe(ctx context.Context, sinceRowID int64) (Stream, error)
+	// LatestRowID returns the newest message row, or 0 when there is none.
+	LatestRowID(ctx context.Context) (int64, error)
 }
 
 // FromSupervisor adapts an imsg supervisor to IMessage.
@@ -53,9 +56,9 @@ func (b supervisorBridge) Subscribe(ctx context.Context, sinceRowID int64) (Stre
 type Config struct {
 	// AccountID is the stable Orka accountId for this Messages account.
 	AccountID string
-	// Allowlist bounds every inbound sender and outbound direct chat.
-	Allowlist   imessage.Allowlist
-	AllowGroups bool
+	// Allowlist bounds every inbound sender and outbound chat. Only direct
+	// chats are supported: a group reply would reach every member.
+	Allowlist imessage.Allowlist
 	// ConformanceChatGUID optionally receives Orka conformance probe sends.
 	ConformanceChatGUID string
 	IngressURL          string
@@ -282,8 +285,8 @@ type routeError struct{ reason string }
 func (e routeError) Error() string { return e.reason }
 
 // deliveryChat resolves and authorizes the destination chat. Orka can only
-// reply to a chat that produced an admitted inbound message, and a direct
-// chat's handle must still be allowlisted.
+// reply to a direct chat that produced an admitted inbound message and whose
+// handle is still allowlisted.
 func (s *Server) deliveryChat(ctx context.Context, request *protocol.DeliveryRequest) (string, error) {
 	if request.AccountID == conformanceRoute && request.ContextID == conformanceRoute &&
 		request.ReplyTarget == conformanceRoute && request.ThreadID == "" {
@@ -313,10 +316,7 @@ func (s *Server) deliveryChat(ctx context.Context, request *protocol.DeliveryReq
 }
 
 func (s *Server) chatAllowed(chat imessage.Chat) bool {
-	if chat.Group {
-		return s.config.AllowGroups
-	}
-	return s.config.Allowlist.Contains(chat.Identifier)
+	return !chat.Group && s.config.Allowlist.Contains(chat.Identifier)
 }
 
 // classifySend maps an imsg send outcome to a durable delivery state. Only
