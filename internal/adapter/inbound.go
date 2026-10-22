@@ -23,9 +23,6 @@ const (
 	// inbound row in the same chat must be for the row to count as the
 	// send's echo (the received copy in a self-chat).
 	echoWindow = 2 * time.Minute
-	// copyWindow is how close in time two received rows with the same chat
-	// and text must be to count as copies of one self-chat message.
-	copyWindow = 10 * time.Second
 	// maxMessageAge matches Orka's event expiry. Older rows are never
 	// forwarded, which also bounds any replay after a cursor reset.
 	maxMessageAge  = 24 * time.Hour
@@ -143,9 +140,10 @@ func (s *Server) handleInbound(ctx context.Context, message imsg.Message) error 
 // mapMessage converts a Messages row into an Orka event, or returns a skip
 // reason. Only text from allowlisted senders in allowed chats is forwarded.
 func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protocol.EventEnvelope, string, error) {
+	if message.IsFromMe {
+		return nil, "sent by this account", s.recordOutgoing(ctx, message)
+	}
 	switch {
-	case message.IsFromMe:
-		return nil, "sent by this account", nil
 	case message.IsReaction:
 		return nil, "reaction", nil
 	case len(message.Poll) > 0 && string(message.Poll) != "null":
@@ -192,6 +190,15 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	if echo {
 		return nil, "echo of an adapter send", nil
 	}
+	if hasCreated {
+		copied, err := s.store.HasOutgoingRow(ctx, chat.GUID, store.TextDigest(text), created)
+		if err != nil {
+			return nil, "", fmt.Errorf("check self-chat copy: %w", err)
+		}
+		if copied {
+			return nil, "copy of an outgoing self-chat row", nil
+		}
+	}
 	event := &protocol.EventEnvelope{
 		ProtocolVersion: protocol.Version,
 		ExternalEventID: message.GUID,
@@ -212,14 +219,22 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	if err := protocol.ValidateEvent(event); err != nil {
 		return nil, "invalid event", nil
 	}
-	duplicate, err := s.store.RecordInbound(ctx, message.GUID, chat.GUID, store.TextDigest(text), reference, copyWindow)
-	if err != nil {
-		return nil, "", fmt.Errorf("record inbound message: %w", err)
-	}
-	if duplicate {
-		return nil, "copy of a forwarded message", nil
-	}
 	return event, "", nil
+}
+
+// recordOutgoing remembers an outgoing row in an allowlisted chat so the
+// received copy that shares its timestamp in a self-chat is not forwarded.
+func (s *Server) recordOutgoing(ctx context.Context, message imsg.Message) error {
+	chat, err := imessage.ParseChatGUID(message.ChatGUID)
+	text := cleanText(message.Text)
+	created, timeErr := time.Parse(time.RFC3339Nano, message.CreatedAt)
+	if err != nil || !s.chatAllowed(chat) || text == "" || timeErr != nil {
+		return nil
+	}
+	if err := s.store.RecordOutgoingRow(ctx, chat.GUID, store.TextDigest(text), created); err != nil {
+		return fmt.Errorf("record outgoing row: %w", err)
+	}
+	return nil
 }
 
 // cleanText drops attachment placeholders and controls Orka rejects.

@@ -1,5 +1,5 @@
 // Package store keeps the adapter's durable state in SQLite: the inbound
-// watch cursor, forwarded messages, chats admitted to Orka, and outbound
+// watch cursor, outgoing self-chat rows, chats admitted to Orka, and outbound
 // delivery idempotency.
 package store
 
@@ -118,14 +118,13 @@ func (s *Store) init(ctx context.Context) error {
 				last_rowid INTEGER NOT NULL CHECK (last_rowid >= 0),
 				updated_at_ms INTEGER NOT NULL
 			);
-			CREATE TABLE inbound_messages (
-				message_guid TEXT PRIMARY KEY,
+			CREATE TABLE outgoing_rows (
 				chat_guid TEXT NOT NULL,
 				text_digest TEXT NOT NULL,
 				created_at_ms INTEGER NOT NULL,
-				recorded_at_ms INTEGER NOT NULL
+				recorded_at_ms INTEGER NOT NULL,
+				PRIMARY KEY (chat_guid, text_digest, created_at_ms)
 			);
-			CREATE INDEX inbound_messages_copies ON inbound_messages (chat_guid, text_digest, created_at_ms);
 			CREATE TABLE reply_chats (
 				chat_guid TEXT PRIMARY KEY,
 				first_seen_at_ms INTEGER NOT NULL,
@@ -201,33 +200,26 @@ func (s *Store) AdvanceCursor(ctx context.Context, rowID int64) error {
 	return err
 }
 
-// RecordInbound records a message about to be forwarded. It reports whether
-// a different message with the same chat and text was already recorded within
-// window of createdAt: Messages stores a self-chat message as more than one
-// received row, each with its own GUID, sometimes inserted much later.
-func (s *Store) RecordInbound(ctx context.Context, messageGUID, chatGUID, textDigest string, createdAt time.Time, window time.Duration) (duplicate bool, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = tx.Rollback() }()
+// RecordOutgoingRow records a row this Messages account sent in an
+// allowlisted chat, keyed by chat, text, and creation time.
+func (s *Store) RecordOutgoingRow(ctx context.Context, chatGUID, textDigest string, createdAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO outgoing_rows (chat_guid, text_digest, created_at_ms, recorded_at_ms)
+		VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, chatGUID, textDigest, createdAt.UnixMilli(), nowMillis())
+	return err
+}
+
+// HasOutgoingRow reports whether an outgoing row with exactly this chat,
+// text, and creation time was recorded. In a self-chat, Messages stores one
+// send as an outgoing row plus two received rows, and exactly one of the
+// received rows carries the outgoing row's timestamp.
+func (s *Store) HasOutgoingRow(ctx context.Context, chatGUID, textDigest string, createdAt time.Time) (bool, error) {
 	var one int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM inbound_messages
-		WHERE chat_guid = ? AND text_digest = ? AND message_guid <> ? AND created_at_ms BETWEEN ? AND ?
-		LIMIT 1`, chatGUID, textDigest, messageGUID,
-		createdAt.Add(-window).UnixMilli(), createdAt.Add(window).UnixMilli()).Scan(&one)
-	switch {
-	case err == nil:
-		return true, tx.Commit()
-	case !errors.Is(err, sql.ErrNoRows):
-		return false, err
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM outgoing_rows WHERE chat_guid = ? AND text_digest = ? AND created_at_ms = ?`,
+		chatGUID, textDigest, createdAt.UnixMilli()).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO inbound_messages (message_guid, chat_guid, text_digest, created_at_ms, recorded_at_ms)
-		VALUES (?, ?, ?, ?, ?) ON CONFLICT (message_guid) DO NOTHING`,
-		messageGUID, chatGUID, textDigest, createdAt.UnixMilli(), nowMillis()); err != nil {
-		return false, err
-	}
-	return false, tx.Commit()
+	return err == nil, err
 }
 
 // RememberReplyChat records that an allowlisted inbound message arrived in chatGUID.

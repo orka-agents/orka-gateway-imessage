@@ -178,25 +178,29 @@ func TestSentNear(t *testing.T) {
 	}
 }
 
-func TestRecordInbound(t *testing.T) {
+func TestOutgoingRows(t *testing.T) {
 	ctx := context.Background()
 	database := openTest(t, filepath.Join(t.TempDir(), "adapter.db"))
-	chat, text, at, window := "any;-;+14155551212", TextDigest("hi"), time.Now(), 10*time.Second
-	for _, tc := range []struct {
-		guid, chat, text string
-		at               time.Time
-		duplicate        bool
+	chat, text := "any;-;+14155551212", TextDigest("hi")
+	at := time.UnixMilli(1_790_000_000_123)
+	for range 2 {
+		if err := database.RecordOutgoingRow(ctx, chat, text, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		chat, text string
+		at         time.Time
+		want       bool
 	}{
-		{"A", chat, text, at, false},
-		{"A", chat, text, at, false},
-		{"B", chat, text, at.Add(2 * time.Second), true},
-		{"C", chat, TextDigest("other"), at, false},
-		{"D", "any;-;me@example.com", text, at, false},
-		{"E", chat, text, at.Add(time.Minute), false},
+		"exact":      {chat, text, at, true},
+		"submilli":   {chat, text, at.Add(400 * time.Microsecond), true},
+		"other time": {chat, text, at.Add(time.Millisecond), false},
+		"other text": {chat, TextDigest("hello"), at, false},
+		"other chat": {"any;-;me@example.com", text, at, false},
 	} {
-		duplicate, err := database.RecordInbound(ctx, tc.guid, tc.chat, tc.text, tc.at, window)
-		if err != nil || duplicate != tc.duplicate {
-			t.Fatalf("%s: duplicate = %v, %v; want %v", tc.guid, duplicate, err, tc.duplicate)
+		if got, err := database.HasOutgoingRow(ctx, tc.chat, tc.text, tc.at); err != nil || got != tc.want {
+			t.Errorf("%s: %v, %v; want %v", name, got, err, tc.want)
 		}
 	}
 }

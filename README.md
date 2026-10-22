@@ -21,7 +21,7 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - **No history replay.** The first start records the newest existing message and begins after it. Every later start resumes from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped. Messages older than 24 hours, Orka's event expiry, are never forwarded.
 - **No duplicate sends.** Deliveries are idempotent in SQLite. A send whose outcome `imsg` cannot prove is recorded as unknown and is never retried, even after a restart.
 - **No reply loops.** Your own outgoing rows are ignored. A self-chat echoes each sent message back as an inbound row, so an inbound row whose text matches an adapter send to the same chat within two minutes of the row's own timestamp is dropped, even when it is processed late.
-- **One turn per message.** In a self-chat, Messages stores each message as more than one received row, each with its own GUID and sometimes inserted much later. Received rows with the same chat and text within 10 seconds of each other are forwarded once. Two identical messages sent within 10 seconds therefore count as one.
+- **One turn per message.** In a self-chat, Messages stores each message as an outgoing row plus two received rows with their own GUIDs, one of which carries the outgoing row's exact timestamp. Outgoing rows in allowlisted chats are recorded, and a received row that matches one exactly is not forwarded, so each send produces one turn and repeated identical messages are kept.
 - **Text only.** Attachments, reactions, polls, edits, and unsends are not forwarded. Threads are not advertised.
 
 ## Requirements
@@ -98,10 +98,10 @@ cloudflared tunnel --url http://127.0.0.1:8787
 export ADAPTER_URL=https://replace-with-generated-host.trycloudflare.com
 ```
 
-The adapter posts events to Orka's API. When the API is not public, forward it to loopback; plaintext HTTP is accepted only for loopback:
+The adapter posts events to Orka's API. When the API is not public, forward it to loopback; plaintext HTTP is accepted only for loopback. The API Service is `orka-api` in a kustomize install and `orka` in a Helm install:
 
 ```bash
-k port-forward service/orka-api 8081:8080 &
+k port-forward service/orka-api 8081:8080 &   # or service/orka for Helm
 ```
 
 Start the adapter in another shell with the same variables:
@@ -128,15 +128,17 @@ k annotate secret imessage-gateway-outbound \
 
 ## Verify
 
+Use fully qualified resource names: on clusters with the Kubernetes Gateway API installed, `gatewayclass` and `gateway` resolve to that API instead of Orka's.
+
 ```bash
-k get gatewayclass imessage-chat
-k get gateway/imessage gatewaybinding/imessage-ai
+k get gatewayclasses.gateway.orka.ai imessage-chat
+k get gateways.gateway.orka.ai/imessage gatewaybindings.gateway.orka.ai/imessage-ai
 ```
 
 Both should report ready once Orka reaches the adapter through the tunnel. Then send a message to the Mac from the allowlisted handle. The adapter logs `forwarded iMessage to Orka`, the Agent runs, and the reply arrives in the same chat:
 
 ```bash
-k get gatewaybinding/imessage-ai \
+k get gatewaybindings.gateway.orka.ai/imessage-ai \
   -o 'jsonpath={.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'
 ```
 
@@ -183,7 +185,8 @@ Keep the tunnel running too, for example as a `cloudflared` service with a named
 
 ```bash
 launchctl bootout "gui/$(id -u)/ai.orka.gateway-imessage" 2>/dev/null || true
-k delete gatewaybinding/imessage-ai gateway/imessage agent/imessage-ai --ignore-not-found
+k delete gatewaybindings.gateway.orka.ai/imessage-ai gateways.gateway.orka.ai/imessage \
+  agents.core.orka.ai/imessage-ai --ignore-not-found
 k delete secret/imessage-gateway-inbound secret/imessage-gateway-outbound --ignore-not-found
 ```
 

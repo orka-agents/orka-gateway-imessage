@@ -606,35 +606,44 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
-func TestInboundForwardsOneOfSeveralSelfChatCopies(t *testing.T) {
+func TestInboundForwardsOneRowPerSelfChatSend(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
-	sent := time.Now().Add(-time.Minute)
-	copyAt := func(id int64, offset time.Duration) imsg.Message {
-		message := inboundMessage(id, "same text")
-		message.CreatedAt = sent.Add(offset).UTC().Format(time.RFC3339Nano)
+	base := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	row := func(id int64, fromMe bool, at time.Time) imsg.Message {
+		message := inboundMessage(id, "ok")
+		message.IsFromMe = fromMe
+		message.CreatedAt = at.UTC().Format(time.RFC3339Nano)
 		return message
 	}
-	// Messages stores one self-chat message as two received rows with their
-	// own GUIDs; the second can be inserted much later with the original time.
-	for _, message := range []imsg.Message{copyAt(10, 0), copyAt(285, 1750*time.Millisecond)} {
+	// Two intentional sends of the same text five seconds apart. Messages
+	// stores each as an outgoing row plus two received rows; one received row
+	// shares the outgoing row's timestamp and may be inserted much later.
+	first, second := base, base.Add(5*time.Second)
+	rows := []imsg.Message{
+		row(10, true, first), row(11, false, first.Add(-195*time.Millisecond)),
+		row(20, true, second), row(21, false, second),
+		row(30, false, first), row(31, false, second.Add(-1752*time.Millisecond)),
+	}
+	for _, message := range rows {
 		if err := h.server.handleInbound(ctx, message); err != nil {
 			t.Fatal(err)
 		}
-	}
-	// A replay of the forwarded row itself is not a copy; Orka deduplicates it.
-	if err := h.server.handleInbound(ctx, copyAt(10, 0)); err != nil {
-		t.Fatal(err)
-	}
-	// The same text sent again later is a new message.
-	if err := h.server.handleInbound(ctx, copyAt(300, time.Minute/2)); err != nil {
-		t.Fatal(err)
 	}
 	var guids []string
 	for _, event := range h.orka.received() {
 		guids = append(guids, event.ExternalEventID)
 	}
-	if strings.Join(guids, ",") != "MSG-10,MSG-10,MSG-300" {
-		t.Fatalf("forwarded %v", guids)
+	if strings.Join(guids, ",") != "MSG-11,MSG-31" {
+		t.Fatalf("forwarded %v; want one row per send", guids)
+	}
+	// Outgoing rows outside allowlisted chats are not recorded.
+	other := row(40, true, base)
+	other.ChatGUID = "iMessage;-;+14155550000"
+	if err := h.server.handleInbound(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if copied, _ := h.store.HasOutgoingRow(ctx, "iMessage;-;+14155550000", store.TextDigest("ok"), base); copied {
+		t.Fatal("recorded an outgoing row from a chat that is not allowlisted")
 	}
 }
