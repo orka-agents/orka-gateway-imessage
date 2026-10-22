@@ -21,6 +21,7 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - **No history replay.** The first start records the newest existing message and begins after it. Every later start resumes from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped. Messages older than 24 hours, Orka's event expiry, are never forwarded.
 - **No duplicate sends.** Deliveries are idempotent in SQLite. A send whose outcome `imsg` cannot prove is recorded as unknown and is never retried, even after a restart.
 - **No reply loops.** Your own outgoing rows are ignored. A self-chat echoes each sent message back as an inbound row, so an inbound row whose text matches an adapter send to the same chat within two minutes of the row's own timestamp is dropped, even when it is processed late.
+- **One turn per message.** In a self-chat, Messages stores each message as more than one received row, each with its own GUID and sometimes inserted much later. Received rows with the same chat and text within 10 seconds of each other are forwarded once. Two identical messages sent within 10 seconds therefore count as one.
 - **Text only.** Attachments, reactions, polls, edits, and unsends are not forwarded. Threads are not advertised.
 
 ## Requirements

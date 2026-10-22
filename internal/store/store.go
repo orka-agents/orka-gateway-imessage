@@ -1,5 +1,6 @@
 // Package store keeps the adapter's durable state in SQLite: the inbound
-// watch cursor, chats admitted to Orka, and outbound delivery idempotency.
+// watch cursor, forwarded messages, chats admitted to Orka, and outbound
+// delivery idempotency.
 package store
 
 import (
@@ -117,6 +118,14 @@ func (s *Store) init(ctx context.Context) error {
 				last_rowid INTEGER NOT NULL CHECK (last_rowid >= 0),
 				updated_at_ms INTEGER NOT NULL
 			);
+			CREATE TABLE inbound_messages (
+				message_guid TEXT PRIMARY KEY,
+				chat_guid TEXT NOT NULL,
+				text_digest TEXT NOT NULL,
+				created_at_ms INTEGER NOT NULL,
+				recorded_at_ms INTEGER NOT NULL
+			);
+			CREATE INDEX inbound_messages_copies ON inbound_messages (chat_guid, text_digest, created_at_ms);
 			CREATE TABLE reply_chats (
 				chat_guid TEXT PRIMARY KEY,
 				first_seen_at_ms INTEGER NOT NULL,
@@ -190,6 +199,35 @@ func (s *Store) AdvanceCursor(ctx context.Context, rowID int64) error {
 		ON CONFLICT (id) DO UPDATE SET last_rowid = MAX(last_rowid, excluded.last_rowid), updated_at_ms = excluded.updated_at_ms`,
 		rowID, nowMillis())
 	return err
+}
+
+// RecordInbound records a message about to be forwarded. It reports whether
+// a different message with the same chat and text was already recorded within
+// window of createdAt: Messages stores a self-chat message as more than one
+// received row, each with its own GUID, sometimes inserted much later.
+func (s *Store) RecordInbound(ctx context.Context, messageGUID, chatGUID, textDigest string, createdAt time.Time, window time.Duration) (duplicate bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var one int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM inbound_messages
+		WHERE chat_guid = ? AND text_digest = ? AND message_guid <> ? AND created_at_ms BETWEEN ? AND ?
+		LIMIT 1`, chatGUID, textDigest, messageGUID,
+		createdAt.Add(-window).UnixMilli(), createdAt.Add(window).UnixMilli()).Scan(&one)
+	switch {
+	case err == nil:
+		return true, tx.Commit()
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO inbound_messages (message_guid, chat_guid, text_digest, created_at_ms, recorded_at_ms)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT (message_guid) DO NOTHING`,
+		messageGUID, chatGUID, textDigest, createdAt.UnixMilli(), nowMillis()); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
 }
 
 // RememberReplyChat records that an allowlisted inbound message arrived in chatGUID.

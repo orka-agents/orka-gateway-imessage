@@ -23,6 +23,9 @@ const (
 	// inbound row in the same chat must be for the row to count as the
 	// send's echo (the received copy in a self-chat).
 	echoWindow = 2 * time.Minute
+	// copyWindow is how close in time two received rows with the same chat
+	// and text must be to count as copies of one self-chat message.
+	copyWindow = 10 * time.Second
 	// maxMessageAge matches Orka's event expiry. Older rows are never
 	// forwarded, which also bounds any replay after a cursor reset.
 	maxMessageAge  = 24 * time.Hour
@@ -208,6 +211,13 @@ func (s *Server) mapMessage(ctx context.Context, message imsg.Message) (*protoco
 	}
 	if err := protocol.ValidateEvent(event); err != nil {
 		return nil, "invalid event", nil
+	}
+	duplicate, err := s.store.RecordInbound(ctx, message.GUID, chat.GUID, store.TextDigest(text), reference, copyWindow)
+	if err != nil {
+		return nil, "", fmt.Errorf("record inbound message: %w", err)
+	}
+	if duplicate {
+		return nil, "copy of a forwarded message", nil
 	}
 	return event, "", nil
 }

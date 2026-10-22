@@ -605,3 +605,36 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 		t.Fatalf("loopback port-forward ingress: %v", err)
 	}
 }
+
+func TestInboundForwardsOneOfSeveralSelfChatCopies(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+	sent := time.Now().Add(-time.Minute)
+	copyAt := func(id int64, offset time.Duration) imsg.Message {
+		message := inboundMessage(id, "same text")
+		message.CreatedAt = sent.Add(offset).UTC().Format(time.RFC3339Nano)
+		return message
+	}
+	// Messages stores one self-chat message as two received rows with their
+	// own GUIDs; the second can be inserted much later with the original time.
+	for _, message := range []imsg.Message{copyAt(10, 0), copyAt(285, 1750*time.Millisecond)} {
+		if err := h.server.handleInbound(ctx, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A replay of the forwarded row itself is not a copy; Orka deduplicates it.
+	if err := h.server.handleInbound(ctx, copyAt(10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// The same text sent again later is a new message.
+	if err := h.server.handleInbound(ctx, copyAt(300, time.Minute/2)); err != nil {
+		t.Fatal(err)
+	}
+	var guids []string
+	for _, event := range h.orka.received() {
+		guids = append(guids, event.ExternalEventID)
+	}
+	if strings.Join(guids, ",") != "MSG-10,MSG-10,MSG-300" {
+		t.Fatalf("forwarded %v", guids)
+	}
+}
