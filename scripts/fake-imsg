@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Minimal `imsg rpc` stand-in for local tests. It never touches Messages.
+
+Each send appends one line to the file named by FAKE_IMSG_SENDS.
+"""
+
+import json
+import os
+import sys
+import uuid
+
+
+def respond(request_id, result=None, error=None):
+    message = {"jsonrpc": "2.0", "id": request_id}
+    if error is not None:
+        message["error"] = error
+    else:
+        message["result"] = result
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    if sys.argv[1:2] != ["rpc"]:
+        sys.stderr.write("usage: fake-imsg rpc\n")
+        return 2
+    sends = os.environ["FAKE_IMSG_SENDS"]
+    subscription = 0
+    for line in sys.stdin:
+        request = json.loads(line)
+        method, params, request_id = request["method"], request.get("params") or {}, request.get("id")
+        if method in ("initialize", "status"):
+            respond(request_id, {"version": "fake", "protocol_version": 1,
+                                 "database": {"path": "/dev/null", "ready": True}})
+        elif method == "watch.subscribe":
+            subscription += 1
+            respond(request_id, {"subscription": subscription, "buffer_limit": 256})
+        elif method == "watch.unsubscribe":
+            respond(request_id, {"ok": True})
+        elif method == "send":
+            if set(params) != {"chat_guid", "text"}:
+                respond(request_id, error={"code": -32602, "message": "Invalid params", "data": "unexpected keys"})
+                continue
+            with open(sends, "a", encoding="utf-8") as log:
+                log.write(json.dumps({"chat_guid": params["chat_guid"]}) + "\n")
+            guid = str(uuid.uuid4()).upper()
+            respond(request_id, {"ok": True, "transport": "applescript", "id": 1, "guid": guid,
+                                 "message_id": guid, "chat_guid": params["chat_guid"]})
+        else:
+            respond(request_id, error={"code": -32601, "message": "Method not found", "data": method})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

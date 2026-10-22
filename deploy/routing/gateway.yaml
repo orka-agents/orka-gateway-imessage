@@ -1,0 +1,17 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: imessage
+  namespace: REPLACE_WITH_NAMESPACE
+  labels:
+    app.kubernetes.io/name: orka-gateway-imessage
+spec:
+  gatewayClassName: imessage-chat
+  adapter:
+    endpoint: "REPLACE_WITH_ADAPTER_URL"
+  inboundAuthRef:
+    name: imessage-gateway-inbound
+    key: token
+  outboundAuthRef:
+    name: imessage-gateway-outbound
+    key: token

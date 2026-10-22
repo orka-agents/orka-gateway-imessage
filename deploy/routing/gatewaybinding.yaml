@@ -1,0 +1,28 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayBinding
+metadata:
+  name: imessage-ai
+  namespace: REPLACE_WITH_NAMESPACE
+  labels:
+    app.kubernetes.io/name: orka-gateway-imessage
+spec:
+  gatewayRef:
+    name: imessage
+  agentRef:
+    name: imessage-ai
+  match:
+    accountId: "REPLACE_WITH_IMESSAGE_ACCOUNT_ID"
+    contextId: "REPLACE_WITH_IMESSAGE_CHAT_GUID"
+  senderPolicy:
+    mode: allowlist
+    allowedSenderIds:
+      - "REPLACE_WITH_IMESSAGE_SENDER_ID"
+  priority: 200
+  session:
+    mode: context-sender
+  taskDefaults:
+    timeout: 10m
+    retryPolicy:
+      maxRetries: 0
+    agentRuntimeMaxTurns: 4
+  activeTurnBehavior: queue

@@ -1,0 +1,148 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func openTest(t *testing.T, path string) *Store {
+	t.Helper()
+	database, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	return database
+}
+
+func TestCursorIsMonotonicAndDurable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "nested", "adapter.db")
+	database := openTest(t, path)
+	if cursor, err := database.Cursor(ctx); err != nil || cursor != 0 {
+		t.Fatalf("initial cursor = %d, %v", cursor, err)
+	}
+	for _, rowID := range []int64{10, 7, 12} {
+		if err := database.AdvanceCursor(ctx, rowID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.AdvanceCursor(ctx, 0); err == nil {
+		t.Fatal("non-positive cursor must be rejected")
+	}
+	_ = database.Close()
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("database mode = %v, %v", info.Mode().Perm(), err)
+	}
+	reopened := openTest(t, path)
+	if cursor, err := reopened.Cursor(ctx); err != nil || cursor != 12 {
+		t.Fatalf("reopened cursor = %d, %v", cursor, err)
+	}
+}
+
+func TestReplyChats(t *testing.T) {
+	ctx := context.Background()
+	database := openTest(t, filepath.Join(t.TempDir(), "adapter.db"))
+	if known, err := database.ReplyChatKnown(ctx, "iMessage;-;+14155551212"); err != nil || known {
+		t.Fatalf("unknown chat = %v, %v", known, err)
+	}
+	for range 2 {
+		if err := database.RememberReplyChat(ctx, "iMessage;-;+14155551212"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if known, err := database.ReplyChatKnown(ctx, "iMessage;-;+14155551212"); err != nil || !known {
+		t.Fatalf("remembered chat = %v, %v", known, err)
+	}
+}
+
+func TestDeliveryLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "adapter.db")
+	database := openTest(t, path)
+	chat, text := "iMessage;-;+14155551212", TextDigest("hello")
+
+	record, send, err := database.ClaimDelivery(ctx, "d1", "digest", chat, text)
+	if err != nil || !send || record.State != DeliverySending {
+		t.Fatalf("first claim = %+v, %v, %v", record, send, err)
+	}
+	if _, send, err := database.ClaimDelivery(ctx, "d1", "digest", chat, text); err != nil || send {
+		t.Fatalf("claim while sending = %v, %v", send, err)
+	}
+	if _, _, err := database.ClaimDelivery(ctx, "d1", "other", chat, text); !errors.Is(err, ErrDigestConflict) {
+		t.Fatalf("conflicting claim = %v", err)
+	}
+	if _, err := database.FinishDelivery(ctx, "d1", "digest", DeliveryRetryable, "", "busy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, send, err := database.ClaimDelivery(ctx, "d1", "digest", chat, text); err != nil || !send {
+		t.Fatalf("retryable reclaim = %v, %v", send, err)
+	}
+	finished, err := database.FinishDelivery(ctx, "d1", "digest", DeliveryDelivered, "GUID-1", "")
+	if err != nil || finished.State != DeliveryDelivered || finished.ProviderMessageID != "GUID-1" {
+		t.Fatalf("finish = %+v, %v", finished, err)
+	}
+	if _, err := database.FinishDelivery(ctx, "d1", "digest", DeliveryPermanent, "", ""); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("overwrite terminal = %v", err)
+	}
+	if replayed, send, err := database.ClaimDelivery(ctx, "d1", "digest", chat, text); err != nil || send || replayed.ProviderMessageID != "GUID-1" {
+		t.Fatalf("terminal replay = %+v, %v, %v", replayed, send, err)
+	}
+
+	if _, _, err := database.ClaimDelivery(ctx, "d2", "digest2", chat, TextDigest("other")); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	reopened := openTest(t, path)
+	interrupted, found, err := reopened.GetDelivery(ctx, "d2")
+	if err != nil || !found || interrupted.State != DeliveryUnknown || interrupted.SafeMessage != OutcomeUnknownMessage {
+		t.Fatalf("interrupted send after restart = %+v, %v, %v", interrupted, found, err)
+	}
+	if _, send, err := reopened.ClaimDelivery(ctx, "d2", "digest2", chat, TextDigest("other")); err != nil || send {
+		t.Fatalf("unknown delivery must never resend: %v, %v", send, err)
+	}
+}
+
+func TestRecentlySent(t *testing.T) {
+	ctx := context.Background()
+	database := openTest(t, filepath.Join(t.TempDir(), "adapter.db"))
+	chat := "iMessage;-;me@example.com"
+	if _, _, err := database.ClaimDelivery(ctx, "d1", "digest", chat, TextDigest("hello\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-time.Minute)
+	if echo, err := database.RecentlySent(ctx, chat, TextDigest(" hello\n"), since); err != nil || !echo {
+		t.Fatalf("in-flight echo = %v, %v", echo, err)
+	}
+	if _, err := database.FinishDelivery(ctx, "d1", "digest", DeliveryPermanent, "", "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if echo, err := database.RecentlySent(ctx, chat, TextDigest("hello"), since); err != nil || echo {
+		t.Fatalf("rejected send must not suppress inbound text: %v, %v", echo, err)
+	}
+	if _, _, err := database.ClaimDelivery(ctx, "d2", "digest2", chat, TextDigest("bye")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.FinishDelivery(ctx, "d2", "digest2", DeliveryDelivered, "G", ""); err != nil {
+		t.Fatal(err)
+	}
+	for name, check := range map[string]func() (bool, error){
+		"other chat": func() (bool, error) { return database.RecentlySent(ctx, "iMessage;-;+1415", TextDigest("bye"), since) },
+		"other text": func() (bool, error) { return database.RecentlySent(ctx, chat, TextDigest("bye!"), since) },
+		"expired": func() (bool, error) {
+			return database.RecentlySent(ctx, chat, TextDigest("bye"), time.Now().Add(time.Minute))
+		},
+	} {
+		if echo, err := check(); err != nil || echo {
+			t.Errorf("%s: echo = %v, %v", name, echo, err)
+		}
+	}
+	if echo, err := database.RecentlySent(ctx, chat, TextDigest("bye"), since); err != nil || !echo {
+		t.Fatalf("delivered echo = %v, %v", echo, err)
+	}
+}
