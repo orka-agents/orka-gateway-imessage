@@ -20,8 +20,7 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - **Replies only where you spoke first.** A delivery is sent only to a direct chat that produced an admitted inbound message and whose handle is still allowlisted. Group chats are never forwarded or answered, because a group reply reaches every member.
 - **No history replay.** The first start records the newest existing message and begins after it. Every later start resumes from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped. Messages older than 24 hours, Orka's event expiry, are never forwarded.
 - **No duplicate sends.** Deliveries are idempotent in SQLite. A send whose outcome `imsg` cannot prove is recorded as unknown and is never retried, even after a restart.
-- **No reply loops.** Your own outgoing rows are ignored. A self-chat echoes each sent message back as an inbound row, so an inbound row whose text matches an adapter send to the same chat within two minutes of the row's own timestamp is dropped, even when it is processed late.
-- **At most one turn per message.** In a self-chat, Messages stores each message as an outgoing row plus received copies with their own GUIDs. Outgoing rows in allowlisted chats are recorded, and a received copy that carries an outgoing row's exact timestamp is not forwarded. The copy delivered to your number or address, stamped slightly earlier, is forwarded, so each send produces one turn and repeated identical messages are kept. Messages can record that copy much later or never, and a message whose copy never arrives gets no turn.
+- **No reply loops.** Outgoing messages, including the adapter's own replies, are never forwarded. An inbound message whose text matches an adapter reply to the same chat within two minutes is dropped as an echo.
 - **Text only.** Attachments, reactions, polls, edits, and unsends are not forwarded. Threads are not advertised.
 
 ## Requirements
@@ -35,16 +34,14 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - A public HTTPS URL that forwards to the adapter, such as a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Orka delivers only to public HTTPS endpoints.
 - Go 1.26 or later to build.
 
-## Choose a Messages account
+## Set up a Messages account
 
-A dedicated account is the reliable setup: you text it from your phone, and its replies come from that account.
+Use a dedicated account: you text it from your phone, and its replies come from that account.
 
 1. Create an Apple Account with an email address you control. iMessage works with an email address alone; a phone number works only as the number of an iPhone.
 2. Add a separate macOS user on the Mac (**System Settings → Users & Groups**) so your own Messages stay signed in to your account. Log in as that user, open Messages, sign in with the new account, and turn on iMessage for its email address.
 3. Keep that user logged in (fast user switching is enough) and follow the rest of this guide as that user. `imsg` reads that user's `chat.db` and drives that user's Messages, and the Automation approval is per user.
 4. Allowlist your own handle, and text the new account's email address from your phone.
-
-Your own account also works through your self-chat (texting your own number or email), but only on a best-effort basis: the copy of each message that the adapter forwards can arrive much later or not at all, and then that message gets no reply. See [Safety model](#safety-model).
 
 ## Build and test
 
