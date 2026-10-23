@@ -21,7 +21,7 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - **No history replay.** The first start records the newest existing message and begins after it. Every later start resumes from the last processed row, so messages that arrive while the adapter is down are processed and none are skipped. Messages older than 24 hours, Orka's event expiry, are never forwarded.
 - **No duplicate sends.** Deliveries are idempotent in SQLite. A send whose outcome `imsg` cannot prove is recorded as unknown and is never retried, even after a restart.
 - **No reply loops.** Your own outgoing rows are ignored. A self-chat echoes each sent message back as an inbound row, so an inbound row whose text matches an adapter send to the same chat within two minutes of the row's own timestamp is dropped, even when it is processed late.
-- **One turn per message.** In a self-chat, Messages stores each message as an outgoing row plus two received rows with their own GUIDs, one of which carries the outgoing row's exact timestamp. Outgoing rows in allowlisted chats are recorded, and a received row that matches one exactly is not forwarded, so each send produces one turn and repeated identical messages are kept.
+- **At most one turn per message.** In a self-chat, Messages stores each message as an outgoing row plus received copies with their own GUIDs. Outgoing rows in allowlisted chats are recorded, and a received copy that carries an outgoing row's exact timestamp is not forwarded. The copy delivered to your number or address, stamped slightly earlier, is forwarded, so each send produces one turn and repeated identical messages are kept. Messages can record that copy much later or never, and a message whose copy never arrives gets no turn.
 - **Text only.** Attachments, reactions, polls, edits, and unsends are not forwarded. Threads are not advertised.
 
 ## Requirements
@@ -30,12 +30,21 @@ A Mac's Messages account is usually a personal account, so the adapter is delibe
 - `imsg` 0.19.0 or later: `brew install steipete/tap/imsg`.
 - Permissions for the process that runs the adapter (your terminal app, or the adapter binary under launchd):
   - **Full Disk Access** to read `chat.db`.
-  - **Automation → Messages** to send. macOS asks on the first send.
+  - **Automation → Messages** to send. Approve it before the first reply; see [Run the adapter](#run-the-adapter).
 - An Orka installation with gateways enabled (the default) and an Agent runtime.
 - A public HTTPS URL that forwards to the adapter, such as a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Orka delivers only to public HTTPS endpoints.
 - Go 1.26 or later to build.
 
-A dedicated Apple ID on the Mac is the clearest setup: you message it from your phone, and its replies come from that account. Using your own Apple ID also works through your self-chat (messaging your own number or email); the echo guard keeps it from looping.
+## Choose a Messages account
+
+A dedicated account is the reliable setup: you text it from your phone, and its replies come from that account.
+
+1. Create an Apple Account with an email address you control. iMessage works with an email address alone; a phone number works only as the number of an iPhone.
+2. Add a separate macOS user on the Mac (**System Settings → Users & Groups**) so your own Messages stay signed in to your account. Log in as that user, open Messages, sign in with the new account, and turn on iMessage for its email address.
+3. Keep that user logged in (fast user switching is enough) and follow the rest of this guide as that user. `imsg` reads that user's `chat.db` and drives that user's Messages, and the Automation approval is per user.
+4. Allowlist your own handle, and text the new account's email address from your phone.
+
+Your own account also works through your self-chat (texting your own number or email), but only on a best-effort basis: the copy of each message that the adapter forwards can arrive much later or not at all, and then that message gets no reply. See [Safety model](#safety-model).
 
 ## Build and test
 
@@ -55,21 +64,20 @@ With Full Disk Access granted to your terminal:
 imsg chats --limit 10 --json | jq '{guid, participants, service}'
 ```
 
-Pick the direct chat you will use. Its `guid` (for example `iMessage;-;+14155551212`) is the Orka `contextId`, and its handle is the sender. Handles are E.164 phone numbers (`+14155551212`) or lowercase email addresses.
+Pick the direct chat you will use; with a dedicated account, text it once first so the chat exists. Its `guid` (for example `iMessage;-;+14155551212`, or `any;-;+14155551212` on recent macOS) is the Orka `contextId`, and its handle is the sender. Handles are E.164 phone numbers (`+14155551212`) or lowercase email addresses.
 
 ## Configure Orka
 
 Run these in one shell, replacing the example values:
 
 ```bash
-set -euo pipefail
 export KUBE_CONTEXT=my-cluster
 export NAMESPACE=orka-system                       # the controller's watched namespace
 export IMESSAGE_ACCOUNT_ID=my-mac-messages         # any stable name for this Messages account
 export IMESSAGE_SENDER_ID=+14155551212             # your handle
-export IMESSAGE_CHAT_GUID='iMessage;-;+14155551212'
+export IMESSAGE_CHAT_GUID='iMessage;-;+14155551212' # the chat guid from imsg chats
 export AGENT_MODEL=your-provider-supported-codex-model
-k() { kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" "$@"; }
+kc() { kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" "$@"; }
 ```
 
 Create the two bearer tokens in owner-only files outside the repository:
@@ -81,17 +89,17 @@ mkdir -p "${SECRET_DIR}"
 for direction in inbound outbound; do
   file="${SECRET_DIR}/orka-gateway-${direction}-token"
   [[ -e "${file}" ]] || openssl rand -hex 32 >"${file}"
-  k create secret generic "imessage-gateway-${direction}" --from-file=token="${file}" \
-    --dry-run=client --output=yaml | k apply -f -
-  k label secret "imessage-gateway-${direction}" "gateway.orka.ai/${direction}-auth=true" \
+  kc create secret generic "imessage-gateway-${direction}" --from-file=token="${file}" \
+    --dry-run=client --output=yaml | kc apply -f -
+  kc label secret "imessage-gateway-${direction}" "gateway.orka.ai/${direction}-auth=true" \
     gateway.orka.ai/gateway-name=imessage --overwrite
-  k annotate secret "imessage-gateway-${direction}" gateway.orka.ai/gateway-name=imessage --overwrite
+  kc annotate secret "imessage-gateway-${direction}" gateway.orka.ai/gateway-name=imessage --overwrite
 done
 ```
 
 ## Run the adapter
 
-Expose the adapter's loopback listener over HTTPS. For a quick test, a [Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) works; its hostname changes on every restart:
+Expose the adapter's loopback listener over HTTPS. For a quick test, a [Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) works; its hostname changes on every restart, so annotate the Secret below again after each one:
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8787
@@ -101,7 +109,13 @@ export ADAPTER_URL=https://replace-with-generated-host.trycloudflare.com
 The adapter posts events to Orka's API. When the API is not public, forward it to loopback; plaintext HTTP is accepted only for loopback. The API Service is `orka-api` in a kustomize install and `orka` in a Helm install:
 
 ```bash
-k port-forward service/orka-api 8081:8080 &   # or service/orka for Helm
+kc port-forward service/orka-api 8081:8080 &   # or service/orka for Helm
+```
+
+Approve Automation before Orka sends anything. A send waits on the macOS prompt, and a send that outlasts `SEND_TIMEOUT` is recorded as unknown and never retried, so a reply that runs into the prompt is lost. In the terminal app that will run the adapter, run this and click **Allow**; it then prints a number:
+
+```bash
+osascript -e 'tell application "Messages" to get count of accounts'
 ```
 
 Start the adapter in another shell with the same variables:
@@ -118,10 +132,10 @@ ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${SECRET_DIR}/orka-gateway-outbound-token" \
 Then point Orka at the tunnel and bind the chat to an Agent:
 
 ```bash
-k apply -f deploy/cluster/gatewayclass.yaml   # cluster-scoped; reuse if already installed
-k annotate secret imessage-gateway-outbound \
+kc apply -f deploy/cluster/gatewayclass.yaml   # cluster-scoped; reuse if already installed
+kc annotate secret imessage-gateway-outbound \
   gateway.orka.ai/adapter-endpoint="${ADAPTER_URL}" --overwrite
-./scripts/render-routing.sh | k apply -f -
+./scripts/render-routing.sh | kc apply -f -
 ```
 
 `render-routing.sh` creates `Agent/imessage-ai` (a Codex `orka.harness.v2` Agent), `Gateway/imessage`, and `GatewayBinding/imessage-ai`. The binding admits only `IMESSAGE_SENDER_ID` in `IMESSAGE_CHAT_GUID` and queues messages while a turn runs. It validates every value before rendering.
@@ -131,14 +145,14 @@ k annotate secret imessage-gateway-outbound \
 Use fully qualified resource names: on clusters with the Kubernetes Gateway API installed, `gatewayclass` and `gateway` resolve to that API instead of Orka's.
 
 ```bash
-k get gatewayclasses.gateway.orka.ai imessage-chat
-k get gateways.gateway.orka.ai/imessage gatewaybindings.gateway.orka.ai/imessage-ai
+kc get gatewayclasses.gateway.orka.ai imessage-chat
+kc get gateways.gateway.orka.ai/imessage gatewaybindings.gateway.orka.ai/imessage-ai
 ```
 
 Both should report ready once Orka reaches the adapter through the tunnel. Then send a message to the Mac from the allowlisted handle. The adapter logs `forwarded iMessage to Orka`, the Agent runs, and the reply arrives in the same chat:
 
 ```bash
-k get gatewaybindings.gateway.orka.ai/imessage-ai \
+kc get gatewaybindings.gateway.orka.ai/imessage-ai \
   -o 'jsonpath={.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'
 ```
 
@@ -172,7 +186,7 @@ The ROWID cursor belongs to one Messages database. If `chat.db` is replaced or r
 1. Build and install the binary somewhere stable, for example `~/.local/bin/orka-gateway-imessage`.
 2. Copy `deploy/launchd/ai.orka.gateway-imessage.plist` to `~/Library/LaunchAgents/` and replace every `REPLACE_WITH_*` value.
 3. Grant **Full Disk Access** to the installed adapter binary. Under launchd it, not your terminal, is the process macOS checks for `imsg`.
-4. Load it, and approve the Automation prompt on the first reply:
+4. Under launchd the adapter binary needs its own Automation approval, which macOS requests on its first send, so text it once while you are at the Mac and click **Allow** promptly. If the prompt outlasts `SEND_TIMEOUT`, that reply is recorded as unknown and never retried. To load it:
 
 ```bash
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/ai.orka.gateway-imessage.plist
@@ -185,9 +199,13 @@ Keep the tunnel running too, for example as a `cloudflared` service with a named
 
 ```bash
 launchctl bootout "gui/$(id -u)/ai.orka.gateway-imessage" 2>/dev/null || true
-k delete gatewaybindings.gateway.orka.ai/imessage-ai gateways.gateway.orka.ai/imessage \
+kc delete gatewaybindings.gateway.orka.ai/imessage-ai gateways.gateway.orka.ai/imessage \
   agents.core.orka.ai/imessage-ai --ignore-not-found
-k delete secret/imessage-gateway-inbound secret/imessage-gateway-outbound --ignore-not-found
+kc delete secret/imessage-gateway-inbound secret/imessage-gateway-outbound --ignore-not-found
 ```
 
-This keeps the shared `GatewayClass/imessage-chat` and the adapter's local database.
+This keeps the shared `GatewayClass/imessage-chat`. Stop `cloudflared` and the port-forward too. To remove local state, delete the adapter's database directory (the default `DATABASE_PATH` location) and the token files:
+
+```bash
+rm -rf "${HOME}/Library/Application Support/orka-gateway-imessage" "${SECRET_DIR}"
+```
