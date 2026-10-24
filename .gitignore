@@ -1,9 +1,11 @@
-/bin/
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
 *.db
 *.db-shm
 *.db-wal
 .env
 .env.*
-!.env.example
 .DS_Store
 __pycache__/
