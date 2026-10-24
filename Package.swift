@@ -16,6 +16,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.16.0"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.13.0"),
         .package(url: "https://github.com/openclaw/imsg.git", exact: "0.19.0"),
     ],
     targets: [
@@ -25,6 +26,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ],
             swiftSettings: swiftSettings,
             linkerSettings: [.linkedLibrary("sqlite3")]

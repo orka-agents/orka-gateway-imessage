@@ -11,7 +11,7 @@ struct OrkaIMessageGatewayApp: App {
         MenuBarExtra {
             MenuContent(controller: appDelegate.controller)
         } label: {
-            Image(systemName: appDelegate.controller.menuSymbol)
+            MenuBarLabel(controller: appDelegate.controller)
         }
         Settings {
             SettingsView(controller: appDelegate.controller)
@@ -43,12 +43,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-extension GatewayController {
-    var menuSymbol: String {
-        switch runState {
-        case .running: needsPermissions ? "exclamationmark.bubble" : "message.fill"
-        case .starting: "message"
-        case .stopped: "message"
+/// The menu bar icon: filled while the gateway runs, a warning when it failed
+/// or lacks a permission.
+private struct MenuBarLabel: View {
+    let controller: GatewayController
+
+    var body: some View {
+        Image(systemName: symbol)
+    }
+
+    private var symbol: String {
+        switch controller.runState {
+        case .running: controller.needsPermissions ? "exclamationmark.bubble" : "message.fill"
+        case .starting, .stopped: "message"
         case .failed: "exclamationmark.bubble"
         }
     }

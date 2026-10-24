@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import Logging
+import ServiceLifecycle
 
 /// Runs the adapter's HTTP server and inbound forwarding together.
 public struct GatewayRuntime: Sendable {
@@ -28,6 +29,8 @@ public struct GatewayRuntime: Sendable {
     }
 
     /// Serves and forwards until the task is cancelled or the server fails.
+    /// Cancellation shuts the server down gracefully, letting in-flight
+    /// requests finish for up to ten seconds.
     public func run() async throws {
         let deliveries = DeliveryService(
             configuration: configuration, store: store, backend: backend, logger: logger, observer: observer
@@ -52,13 +55,21 @@ public struct GatewayRuntime: Sendable {
             },
             logger: logger
         )
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { try await application.run() }
-            group.addTask { await forwarder.run() }
-            // The forwarder only returns on cancellation; the server returns or
-            // throws when it stops. Either way, stop the other.
-            _ = try await group.next()
-            group.cancelAll()
+        var serviceConfiguration = ServiceGroupConfiguration(services: [application], logger: logger)
+        serviceConfiguration.maximumGracefulShutdownDuration = .seconds(10)
+        let services = ServiceGroup(configuration: serviceConfiguration)
+        // Unstructured, so cancelling run() requests a graceful shutdown
+        // instead of cancelling the server outright.
+        let server = Task { try await services.run() }
+        let forwarding = Task { await forwarder.run() }
+        try await withTaskCancellationHandler {
+            let result = await server.result
+            forwarding.cancel()
+            await forwarding.value
+            try result.get()
+        } onCancel: {
+            forwarding.cancel()
+            Task { await services.triggerGracefulShutdown() }
         }
     }
 }

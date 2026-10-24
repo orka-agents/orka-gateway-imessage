@@ -93,7 +93,7 @@ var signalSources: [DispatchSourceSignal] = []
 for signalNumber in [SIGTERM, SIGINT] {
     signal(signalNumber, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
-    source.setEventHandler { task.cancel() }
+    source.setEventHandler { @Sendable in task.cancel() }
     source.resume()
     signalSources.append(source)
 }

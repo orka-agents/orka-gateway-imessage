@@ -29,7 +29,7 @@ A Mac's Messages account is usually a personal account, so the gateway is delibe
 - macOS 14 or later, signed in to Messages with iMessage working.
 - An Orka installation with gateways enabled (the default) and an Agent runtime.
 - A public HTTPS URL that forwards to the gateway, such as a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Orka delivers only to public HTTPS endpoints.
-- Xcode 26 or later (Swift 6.2) to build. An Apple Development certificate lets macOS keep the app's permissions across rebuilds; without one the app is signed ad hoc.
+- Xcode 27 or later to build; it packages SwiftPM resources where an installed app finds them. An Apple Development certificate lets macOS keep the app's permissions across rebuilds; without one the app is signed ad hoc.
 
 ## Set up a Messages account
 
