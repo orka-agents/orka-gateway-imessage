@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Run an Orka checkout's gateway conformance tool against a local adapter.
+"""Run an Orka checkout's gateway conformance tool against the gateway.
 
-The adapter talks to scripts/fake-imsg, so no real message is sent.
+It uses gateway-conformance-host, whose Messages backend is a fake that
+records sends to a file, so no real message is sent.
 """
 
 import argparse
@@ -34,7 +35,7 @@ def wait_ready(process, endpoint):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("adapter exited before readiness")
+            raise RuntimeError("gateway exited before readiness")
         try:
             with opener.open(endpoint + "/readyz", timeout=0.5) as response:
                 if response.status == 200:
@@ -42,10 +43,10 @@ def wait_ready(process, endpoint):
         except (urllib.error.URLError, TimeoutError, ConnectionError):
             pass
         time.sleep(0.05)
-    raise RuntimeError("adapter readiness timed out")
+    raise RuntimeError("gateway readiness timed out")
 
 
-def check(root, repo, adapter_binary, conformance_binary):
+def check(root, adapter_binary, conformance_binary):
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
@@ -56,13 +57,12 @@ def check(root, repo, adapter_binary, conformance_binary):
     # Avoid inheriting credentials or *_FILE settings from the caller.
     base_env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL") if key in os.environ}
     adapter_env = dict(
-        base_env, LISTEN_ADDRESS=f"127.0.0.1:{port}", DATABASE_PATH=str(root / "adapter.db"),
-        IMSG_PATH=str(repo / "scripts/fake-imsg"), FAKE_IMSG_SENDS=str(sends),
+        base_env, LISTEN_ADDRESS=f"127.0.0.1:{port}", DATABASE_PATH=str(root / "gateway.db"),
+        FAKE_SENDS=str(sends),
         IMESSAGE_ACCOUNT_ID="compat-account", IMESSAGE_ALLOWED_SENDERS="+15555550100",
         IMESSAGE_CONFORMANCE_CHAT_GUID=CONFORMANCE_CHAT,
         ORKA_GATEWAY_INGRESS_URL="http://127.0.0.1:9/api/v1/gateways/compat/imessage/events",
         ORKA_GATEWAY_INBOUND_TOKEN=secrets.token_hex(32), ORKA_GATEWAY_OUTBOUND_TOKEN=outbound,
-        REQUEST_TIMEOUT="5s", SHUTDOWN_TIMEOUT="5s",
     )
     cli_env = dict(base_env, COMPAT_CONFORMANCE_TOKEN=outbound)
     for phase in ("fresh database", "after adapter restart"):
@@ -85,7 +85,7 @@ def check(root, repo, adapter_binary, conformance_binary):
     # Two interim messages and one final; the restart run replays all three.
     if len(recorded) != 3 or any(entry["chat_guid"] != CONFORMANCE_CHAT for entry in recorded):
         raise RuntimeError(f"expected three sends to the conformance chat across replays and restart; got {recorded}")
-    print("Passed durable replay: exactly three sends to the fake imsg conformance chat", flush=True)
+    print("Passed durable replay: exactly three sends to the fake conformance chat", flush=True)
 
 
 def main():
@@ -100,14 +100,14 @@ def main():
     print(f"Checking against Orka {revision}", flush=True)
     with tempfile.TemporaryDirectory(prefix="orka-imessage-compat-") as temporary:
         root = Path(temporary)
-        adapter_binary = root / "adapter"
         conformance_binary = root / "orka-conformance"
-        subprocess.run(["go", "build", "-mod=readonly", "-o", str(adapter_binary), "./cmd/orka-gateway-imessage"],
-                       cwd=repo, check=True)
+        subprocess.run(["swift", "build", "--product", "gateway-conformance-host"], cwd=repo, check=True)
+        bin_path = subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=repo, text=True).strip()
+        adapter_binary = Path(bin_path) / "gateway-conformance-host"
         subprocess.run(["go", "build", "-mod=readonly", "-o", str(conformance_binary), "./cmd/orka-gateway-conformance"],
                        cwd=orka_dir, check=True)
         try:
-            check(root, repo, adapter_binary, conformance_binary)
+            check(root, adapter_binary, conformance_binary)
         except Exception:
             log = root / "adapter.log"
             if log.exists():
