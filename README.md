@@ -85,7 +85,7 @@ done
 
 ## Connect the gateway
 
-Expose the gateway's loopback listener over HTTPS. For a quick test, a [Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) works; its hostname changes on every restart, so annotate the Secret below again after each one:
+Expose the gateway's loopback listener over HTTPS. For a quick test, a [Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) works. Its hostname changes on every restart, so after each one set `ADAPTER_URL` to the new hostname and run the `annotate` and `render-routing.sh` commands below again: Orka keeps the Gateway unready until its endpoint matches the outbound Secret's annotation.
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8787
