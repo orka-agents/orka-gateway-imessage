@@ -178,4 +178,59 @@ struct ServerTests {
         }
         #expect(harness.backend.sends.current.count == 1)
     }
+
+    @Test func closingRefusesQueuedSendsAndFinishesTheSendInProgress() async throws {
+        let store = try GatewayStore(path: temporaryStorePath())
+        try await store.rememberReplyChat(testChat)
+        let backend = BlockingBackend()
+        let deliveries = DeliveryService(
+            configuration: try testConfiguration(), store: store, backend: backend, logger: quietLogger, observer: { _ in }
+        )
+        let inProgress = Task { await deliveries.handle(body: deliveryBody(deliveryID: "gdl-a", idempotencyID: "gid-a", text: "a")) }
+        while backend.started.current.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let queued = Task { await deliveries.handle(body: deliveryBody(deliveryID: "gdl-b", idempotencyID: "gid-b", text: "b")) }
+        try await Task.sleep(for: .milliseconds(50))
+        await deliveries.close()
+
+        #expect(await queued.value.response == .retryable("gateway is stopping"))
+        backend.release()
+        #expect(await inProgress.value.response == .delivered("MSG-a"))
+        #expect(backend.started.current == ["a"])
+        #expect(try await store.delivery("gid-b") == nil)
+    }
+}
+
+/// Holds every send until released.
+private final class BlockingBackend: MessagesBackend {
+    let started = Locked<[String]>([])
+    private let gate = Locked<CheckedContinuation<Void, Never>?>(nil)
+    private let released = Locked(false)
+
+    func latestRowID() async throws -> Int64 { 0 }
+
+    func watch(after _: Int64) async throws -> MessageSubscription {
+        MessageSubscription { nil }
+    }
+
+    func send(text: String, toChat _: String) async -> SendOutcome {
+        await withCheckedContinuation { continuation in
+            let resumeNow = released.withLock { isReleased in
+                if !isReleased { gate.withLock { $0 = continuation } }
+                return isReleased
+            }
+            started.withLock { $0.append(text) }
+            if resumeNow { continuation.resume() }
+        }
+        return .delivered(providerMessageID: "MSG-\(text)")
+    }
+
+    func release() {
+        released.withLock { $0 = true }
+        gate.withLock { continuation in
+            continuation?.resume()
+            continuation = nil
+        }
+    }
 }

@@ -69,7 +69,8 @@ public struct GatewayConfiguration: Sendable {
                 problems.append("conformance chat must be a direct chat with an allowlisted handle")
             }
         }
-        if listenHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(1 ... 65535).contains(listenPort) {
+        let listenHost = listenHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        if listenHost.isEmpty || !(1 ... 65535).contains(listenPort) {
             problems.append("listen address is invalid")
         }
         guard problems.isEmpty, let allowlist, let url else {

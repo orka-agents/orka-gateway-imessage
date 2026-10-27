@@ -79,6 +79,7 @@ public final class IMsgBackend: MessagesBackend, @unchecked Sendable {
         let store: MessageStore
         let chat: ChatInfo
         let target: DirectParticipantTarget
+        let rowsBeforeSend: Int64
         do {
             store = try self.store()
             guard let found = try store.chatInfo(matchingExactGUID: chatGUID) else {
@@ -91,6 +92,9 @@ public final class IMsgBackend: MessagesBackend, @unchecked Sendable {
             }
             chat = found
             target = direct
+            // Only a row newer than this can confirm the send, so an earlier
+            // identical message never stands in for it.
+            rowsBeforeSend = try store.maxRowID()
         } catch {
             return .notDispatched("Messages database unavailable")
         }
@@ -117,7 +121,7 @@ public final class IMsgBackend: MessagesBackend, @unchecked Sendable {
         repeat {
             if let message = try? store.latestSentMessage(
                 matchingText: text, chatID: chat.id, since: sentAt.addingTimeInterval(-2)
-            ) {
+            ), message.rowID > rowsBeforeSend {
                 return .delivered(providerMessageID: message.guid)
             }
             Thread.sleep(forTimeInterval: 0.1)

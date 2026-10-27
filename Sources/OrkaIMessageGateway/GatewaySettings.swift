@@ -59,7 +59,9 @@ enum TokenStore {
     /// Returns 32 random bytes as hex.
     static func generate() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        // Never hand out a predictable zero-filled token.
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed with status \(status)")
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 

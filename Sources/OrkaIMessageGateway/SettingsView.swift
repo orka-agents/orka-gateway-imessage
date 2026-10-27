@@ -24,6 +24,8 @@ private struct GeneralSettings: View {
     @State private var inboundToken = ""
     @State private var outboundToken = ""
     @State private var error: String?
+    /// True while a save restarts the gateway; a second save must not overlap it.
+    @State private var isSaving = false
 
     var body: some View {
         Form {
@@ -72,10 +74,10 @@ private struct GeneralSettings: View {
                 HStack {
                     Spacer()
                     Button("Revert") { load() }
-                        .disabled(!isDirty)
+                        .disabled(!isDirty || isSaving)
                     Button(controller.isRunning ? "Save and Restart" : "Save") { save() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!isDirty)
+                        .disabled(!isDirty || isSaving)
                 }
             }
         }
@@ -100,7 +102,10 @@ private struct GeneralSettings: View {
     }
 
     private func save() {
+        guard !isSaving else { return }
+        isSaving = true
         Task {
+            defer { isSaving = false }
             do {
                 try await controller.apply(settings: draft, inboundToken: inboundToken, outboundToken: outboundToken)
                 error = nil

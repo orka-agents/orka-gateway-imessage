@@ -57,8 +57,16 @@ public final class DeliveryService: Sendable {
         // that has already started; a retry replays the stored outcome.
         let response = await Task {
             await gate.withLock { await self.deliver(request, digest: digest) }
+                ?? .retryable("gateway is stopping")
         }.value
         return (200, response)
+    }
+
+    /// Stops admitting sends. Deliveries still waiting for their turn return
+    /// retryable without sending; a send already in progress finishes and
+    /// records its outcome.
+    public func close() async {
+        await gate.close()
     }
 
     private func deliver(_ request: DeliveryRequest, digest: String) async -> DeliveryResponse {
@@ -194,28 +202,41 @@ public final class DeliveryService: Sendable {
 /// A FIFO async mutex.
 actor AsyncGate {
     private var locked = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var closed = false
+    private var waiters: [CheckedContinuation<Bool, Never>] = []
 
-    func withLock<T: Sendable>(_ body: @Sendable () async -> T) async -> T {
-        await acquire()
+    /// Runs body alone, or returns nil without running it once the gate is closed.
+    func withLock<T: Sendable>(_ body: @Sendable () async -> T) async -> T? {
+        guard await acquire() else { return nil }
         let value = await body()
         release()
         return value
     }
 
-    private func acquire() async {
+    /// Refuses every waiting and future caller.
+    func close() {
+        closed = true
+        let refused = waiters
+        waiters = []
+        for waiter in refused {
+            waiter.resume(returning: false)
+        }
+    }
+
+    private func acquire() async -> Bool {
+        if closed { return false }
         if !locked {
             locked = true
-            return
+            return true
         }
-        await withCheckedContinuation { waiters.append($0) }
+        return await withCheckedContinuation { waiters.append($0) }
     }
 
     private func release() {
         if waiters.isEmpty {
             locked = false
         } else {
-            waiters.removeFirst().resume()
+            waiters.removeFirst().resume(returning: true)
         }
     }
 }

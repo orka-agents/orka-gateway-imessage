@@ -61,14 +61,26 @@ public final class HTTPEventIngress: EventIngress {
         request.httpBody = body
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let data: Data
+        var data = Data()
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            let bytes: URLSession.AsyncBytes
+            (bytes, response) = try await session.bytes(for: request)
+            // Read incrementally so an oversized body is refused before it is
+            // buffered.
+            for try await byte in bytes {
+                guard data.count < GatewayProtocol.maxAdapterResponseBytes else {
+                    bytes.task.cancel()
+                    throw IngressError.transient("Orka ingress response was invalid")
+                }
+                data.append(byte)
+            }
+        } catch let error as IngressError {
+            throw error
         } catch {
             throw IngressError.transient("Orka ingress request failed")
         }
-        guard let http = response as? HTTPURLResponse, data.count <= GatewayProtocol.maxAdapterResponseBytes else {
+        guard let http = response as? HTTPURLResponse else {
             throw IngressError.transient("Orka ingress response was invalid")
         }
         switch http.statusCode {

@@ -69,7 +69,10 @@ public struct GatewayRuntime: Sendable {
             try result.get()
         } onCancel: {
             forwarding.cancel()
-            Task { await services.triggerGracefulShutdown() }
+            Task {
+                await deliveries.close()
+                await services.triggerGracefulShutdown()
+            }
         }
     }
 }

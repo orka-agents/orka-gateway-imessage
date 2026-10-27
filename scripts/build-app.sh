@@ -25,8 +25,10 @@ swift build -c "$CONF" --product "$APP_NAME"
 BIN_DIR=$(swift build -c "$CONF" --show-bin-path)
 # Swift Build's resource accessors look in Contents/Resources. The older
 # SwiftPM build system instead embeds the absolute build path, so its app
-# would crash once installed anywhere else.
-if strings "$BIN_DIR/$APP_NAME" | grep -qE "^$ROOT/\.build/.*\.bundle$"; then
+# would crash once installed anywhere else. grep reads all of strings's
+# output: with -q it could exit at the first match, and under pipefail the
+# SIGPIPE strings then receives would hide that match.
+if strings "$BIN_DIR/$APP_NAME" | grep -E "^$ROOT/\.build/.*\.bundle$" >/dev/null; then
   echo "ERROR: this toolchain locates resource bundles by build path; build with Xcode 27 or later" >&2
   exit 1
 fi

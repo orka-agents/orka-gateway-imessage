@@ -15,7 +15,8 @@ test: ## Run the unit tests.
 	swift test
 
 test-scripts: ## Check shell and Python script syntax.
-	bash -n scripts/build-app.sh scripts/render-routing.sh
+	bash -n scripts/build-app.sh
+	bash -n scripts/render-routing.sh
 	python3 -m py_compile scripts/test-orka-compatibility.py
 	plutil -lint Resources/OrkaIMessageGateway.entitlements
 

@@ -53,6 +53,8 @@ The app lives in the menu bar. Grant its two permissions before it handles messa
 1. **Full Disk Access**, to read Messages: **System Settings → Privacy & Security → Full Disk Access**, add **Orka iMessage Gateway**, then quit and reopen the app.
 2. **Automation → Messages**, to send: choose **Allow Sending with Messages…** and click **Allow**. Do this before Orka replies: a send waits on the macOS prompt, and a send whose outcome cannot be proven is never retried, so a reply that runs into the prompt is lost.
 
+If you ran the earlier Go adapter, stop it and let Orka finish or expire its pending deliveries before you start the app. The app keeps its own delivery records and does not read the Go adapter's database, so it cannot recognize a delivery the Go adapter already handled.
+
 ## Configure Orka
 
 Run these in one shell, replacing the example values:
